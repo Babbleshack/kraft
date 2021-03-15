@@ -56,7 +56,7 @@ from kraft.error import KraftError
 OCI_IMAGE_SCHEMA_VERSION = 2
 
 class Artifact:
-    def __init__(self, path, image_path):
+    def __init__(self, path):
         """
         Artifact is a base class for wraping some arbitrary content which
         should compressed into a layer and stored as a blob.
@@ -65,9 +65,11 @@ class Artifact:
         :param path contents should be stored in oci-image.
         """
         self._path = path
-        self._image_path = image_path
-        
 
+    @property
+    def path(self):
+        return self._path
+        
     def create_digest(self, digester):
         """
         returns a digest
@@ -79,7 +81,7 @@ class Artifact:
 class ImageWrapper(Artifact):
     # path where image should be stored inside osi-image
     _image_path = '/image/%s'
-    def __init__(self, path, architecture, platform):
+    def __init__(self, path="", architecture="", platform="", uk_conf=""):
         """
         ImageWrapper is an artifact wrapping a path to an image, its architecture and
         platform it was built for.
@@ -87,16 +89,29 @@ class ImageWrapper(Artifact):
         :param path to image.
         :param architecture image was built for (e.g. x86_64, ARM64).
         :param platform image was built for (e.g. kvm, xen).
+        :param uk_conf path to configuration file for building uk image
         """
-        image_name = os.path.basename(path)
-        super().__init__(path, Image._image_path % image_name)
-        self._image = image_name
+        print("====================")
+        print(path)
+        print("====================")
+        if not path:
+            raise KraftError(ValueError("Invalid path to kernel image."))
+        if not architecture:
+            raise KraftError(ValueError("Invalid architecture."))
+        if not platform:
+            raise KraftError(ValueError("Invalid platform."))
+        if not uk_conf:
+            raise KraftError(ValueError("Invalid path to unikraft config file."))
+        super().__init__(path)
+        #image_name = os.path.basename(path)
+        self._image_name = os.path.basename(path)
         self._architecture = architecture
         self._platform = platform 
+        self._conf = uk_conf
 
     @property
-    def image(self):
-        return self._image
+    def image_name(self):
+        return self._image_name
 
     @property
     def architecture(self):
@@ -105,6 +120,10 @@ class ImageWrapper(Artifact):
     @property
     def platform(self):
         return self._platform
+
+    @property
+    def config(self):
+        return self._conf
 
 
 class FileSystem(Artifact):
@@ -211,9 +230,9 @@ HASH_BUFF_SIZE = 1024 * 64 #64k
 class Packager:
     def __init__(
         self,
-        image=ImageWrapper(path=None, architecture=None, platform=None),
+        #image=ImageWrapper(path=None, architecture=None, platform=None, uk_conf=None),
+        image="",
         filesystem="",
-        uk_conf="",
         artifacts=[],
         digest_algorithm=default_digest_algorithm,
         hash_buffer_size=HASH_BUFF_SIZE
@@ -224,7 +243,6 @@ class Packager:
 
         :param image is the path to kernel image.
         :param filesystem path to filesystem image (e.g. initrd)
-        :param uk_conf is a path to the unikernel config file.
         :param artifacts is a list of type `Artifact` encapsulating arbitrary data.
         :param digest_algorithm is the algorithm used.
             valid options are one of `kraft.package.oci.image.v1.algorithm.algorithms` 
@@ -233,20 +251,17 @@ class Packager:
         :param optional, set hash buffer size.
         """
         if not image:
-            raise KraftError(ValueError("Invalid path to kernel image"))
-        if not uk_conf:
-            raise KraftError(ValueError("Invalid path to image config"))
+            raise KraftError(ValueError("image must be set"))
         if digest_algorithm not in algorithms:
             raise KraftError(ValueError("Invalid algorithm selected"))
         self._image = image
         self._filesystem_path = filesystem 
         self._artifacts = artifacts
-        self._uk_config = uk_conf
         self._digester = digest_algorithm.digester()
+        self._hash_buff_size = hash_buffer_size
         self._index = None
         self._manifest = None
         self._image_config = None
-        self._hash_buff_size = hash_buffer_size
 
     def create_oci_filesystem(self):
         """
