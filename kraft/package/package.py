@@ -38,22 +38,13 @@ from kraft.package.oci.opencontainers.image.v1 import (
     Index,
     Manifest
 )
-
 from kraft.package.oci.opencontainers.digest  import (
-    SHA256,
-    SHA384,
-    SHA512,
     Canonical as default_digest_algorithm,
-    digester,
-    Algorithm
 )
-
+from kraft.package.oci.opencontainers.digest.exceptions import ErrDigestInvalidFormat
 from kraft.package.oci.opencontainers.digest.algorithm import algorithms
-
-
-
-from kraft.package.oci.opencontainers.digest import digest
-from kraft.logger import logger
+from kraft.error import KraftError
+#from kraft.logger import logger
 
 OCI_IMAGE_SCHEMA_VERSION = 2
 
@@ -109,32 +100,31 @@ class FileSystem(Artifact):
 
 """
 Steps for packaing as oci_image tar
-*) Create temporary directory (e.g. /tmp/image/)
-*) Create oci_imge temp dir (e.g /tmp/image/oci)
+[x] Create temporary directory (e.g. /tmp/image/)
+[x] Create oci_imge temp dir (e.g /tmp/image/oci)
 
-*) Create root fs (e.g. /tmp/image/rootfs)
+[x] Create rootfs (e.g. /tmp/image/rootfs)
 
-*) Move artefacts to temp root fs (e.g. /tmp/image/rootfs/image/xxxx)
-*) tar temp rootfs -> /tmp/image/rootfs.tar.[gz|xz]
-*) rootfs_tar_sha = shaXXX /tmp/image.tar.[gz|xz] 
-*) move rootfs_tar to oci_image (e.g. /tmp/image/oci/blobs/shaXXX/`rootfs_tar_sha`
+[x] Move artefacts to temp root fs (e.g. /tmp/image/rootfs/image/xxxx)
+[x] tar temp rootfs -> /tmp/image/rootfs.tar.[gz|xz]
+[x] rootfs_tar_digest = shaXXX /tmp/image.tar.[gz|xz] 
+[x] move rootfs_tar to oci_image (e.g. /tmp/image/oci/blobs/shaXXX/`rootfs_tar_digest.encoded`
 
-*) init config object 
-*) config_sha = shaXXX config object
-*) write config object to /tmp/image/oci/blobs/shaXXX/`config_sha`
+[] init config object 
+[] config_digest = shaXXX config object
+[] write config object to /tmp/image/oci/blobs/shaXXX/`config_digest.encoded`
 
-*) Init Manifest object (config sha, layers sha)
-*) manifest_sha = shaXXX manfiest object
-*) write manifest object to /tmp/image/oci/blobs/shaXXX/`manifest_sha`  
+[] Init Manifest object (config sha, layers sha)
+[] manifest_digest = shaXXX manfiest object
+[] write manifest object to /tmp/image/oci/blobs/shaXXX/`manifest_digest.encoded`  
 
-*) init index (manifest sha)
-*) write index to manifest /tmp/image/oci/index.json
+[] init index (manifest sha)
+[] write index to manifest /tmp/image/oci/index.json
 
-*) tar oci (e.g. tar czf /tmp/<image_id> /tmp/image/oci)
+[] tar oci (e.g. tar czf /tmp/<image_id> /tmp/image/oci)
 """
 
-@unique
-class TemporaryDirs(Enum):
+class TemporaryDirs:
     ROOT        = '%s'
     ROOTFS      = '%s/rootfs'
     IMAGE       = '%s/rootfs/image'
@@ -146,7 +136,7 @@ class TemporaryDirs(Enum):
 
     def __init__(self, dirs):
         """
-        TemporaryDirs is a wrapper class for managing temporary dirs use for building images.
+        TemporaryDirs is a wrapper class managing temporary dirs used for building images.
         """
         if not dirs:
             raise ValueError("Init with create_staging_dirs")
@@ -161,17 +151,20 @@ class TemporaryDirs(Enum):
         """
         temp_dir = tempfile.mkdtemp()
         temp = {
-            'root':         cls.ROOT.value % (temp_dir),
-            'rootfs':       cls.ROOTFS.value % (temp_dir),
-            'image':        cls.IMAGE.value % (temp_dir),
-            'filesystem':   cls.FILESYSTEM.value % (temp_dir),
-            'oci_image':    cls.OCI_IMAGE.value % (temp_dir),
-            'oci_blobs':    cls.OCI_BLOBS.value % (temp_dir),
-            'tars':         cls.TARS.value % (temp_dir) # temp location for tars
+            'root':         cls.ROOT % (temp_dir),
+            'rootfs':       cls.ROOTFS % (temp_dir),
+            'image':        cls.IMAGE % (temp_dir),
+            'filesystem':   cls.FILESYSTEM % (temp_dir),
+            'oci_image':    cls.OCI_IMAGE % (temp_dir),
+            'oci_blobs':    cls.OCI_BLOBS % (temp_dir),
+            'tars':         cls.TARS % (temp_dir) # temp location for tars
             #'artifacts':   '%s/rootfs/artifacts' % (temp_dir),
         }
         ## dont need to check if dir already exists -- tmp file
-        for _, dir in temp:
+        for key, dir in temp.items():
+            #skip root this is the temo dir
+            if key == 'root':
+                continue
             os.mkdir(dir)
         return TemporaryDirs(temp)
 
@@ -182,10 +175,17 @@ class TemporaryDirs(Enum):
         os.rmdir(self._dirs['root'])
 
     def get_path(self, key): 
+        """
+        Get a path managed by TemporaryDirs
+        :return path
+        :raise ValueError if invalid key
+        """
         if key not in self._dirs:
             raise ValueError("Invalid directory key: %s" % key)
         return self._dirs[key]
-    
+
+## TODO: figure out how to pass class/static var as default __init__ param
+HASH_BUFF_SIZE = 1024 * 64 #64k
 class Packager:
     def __init__(
         self,
@@ -193,7 +193,8 @@ class Packager:
         filesystem="",
         uk_conf="",
         artifacts=[],
-        digest_algorithm=default_digest_algorithm
+        digest_algorithm=default_digest_algorithm,
+        hash_buffer_size=HASH_BUFF_SIZE
     ):
         """
         Package wraps a collection of artifacts and a kernel image into the oci
@@ -203,16 +204,18 @@ class Packager:
         :param filesystem path to filesystem image (e.g. initrd)
         :param uk_conf is a path to the unikernel config file.
         :param artifacts is a list of type `Artifact` encapsulating arbitrary data.
-        :param digest_algorithm is the algorithm used default is
-            `kraft.package.oci.image.v1.algorithm.Canonical`.
+        :param digest_algorithm is the algorithm used.
+            valid options are one of `kraft.package.oci.image.v1.algorithm.algorithms` 
+            (e.g. "sha256", "sha384", "sha512")
         :param uk_conf is the path to the unikernel configuration file.
+        :param optional, set hash buffer size.
         """
-        if digest_algorithm not in algorithms:
-            raise ValueError("Invalid algorithm selected")
         if not image:
-            raise ValueError("Invalid path to kernel image")
+            raise KraftError(ValueError("Invalid path to kernel image"))
         if not uk_conf:
-            raise ValueError("Invalid path to image config")
+            raise KraftError(ValueError("Invalid path to image config"))
+        if digest_algorithm not in algorithms:
+            raise KraftError(ValueError("Invalid algorithm selected"))
         self._image_path = image
         self._filesystem_path = filesystem 
         self._artifacts = artifacts
@@ -220,35 +223,43 @@ class Packager:
         self._digester = digest_algorithm.digester()
         self._index = Index()
         self._manifest = Manifest()
+        self._hash_buff_size = hash_buffer_size
 
     def create_oci_filesystem(self):
         """
-        create_oci_filesystem creates the filesystem which should be wrapped up
-        by the oci bundle
+        create_oci_filesystem creates OCI Image rootfs, tars it and creates a digest.
+        :return dict{'path': <path to tar>, 'digest': <digest over tared contents>}.
         """
         staging_dirs = TemporaryDirs.create_staging_dirs()
-
         image_name = os.path.basename(self._image_path)
         image_path = '%s/%s' %(staging_dirs.get_path('image'), image_name) 
-        shutil.copy(self._image_path, image_path)
-
+        shutil.copy2(self._image_path, image_path)
         if self._filesystem_path:
             fs_name = os.path.basename(self._filesystem_path)
             shutil.copy(self._image_path, '%s/%s'
                         %(staging_dirs.get_path('filesystem'), fs_name))
-
-        ## copy artifacts
+        ## copy artifacts/filesystem
 
         ## tar up rootfs
-        tar_rootfs_path = '%s/%s' % (staging_dirs.get_path('tars'), 'rootfs.tar.xz')
-        with tarfile.open(tar_rootfs_path, "w") as tar:
-            tar.add(image_path)
-
+        tar_rootfs_path = '%s/%s' % (staging_dirs.get_path('tars'), 'rootfs.tar.gz')
+        with tarfile.open(tar_rootfs_path, "w:gz") as tar:
+            tar.add(staging_dirs.get_path('rootfs'), arcname='/rootfs')
+        tar_digest = {
+            'path': tar_rootfs_path,
+            'digest': None
+        }
         ## Create digests
         with open(tar_rootfs_path, 'rb') as f:
-            digest.NewDigestFromBytes(Algorithm(SHA256), b'some bytes')
-
-        raise NotImplementedError()
+            data = f.read(self._hash_buff_size)
+            while data:
+                self._digester.hash.update(data)
+                data = f.read(self._hash_buff_size)
+            tar_digest['digest'] = self._digester.digest() 
+        try:
+            tar_digest['digest'].validate()
+        except ErrDigestInvalidFormat as e:
+            raise KraftError("Invalid rootfs digest: %s" % e)
+        return tar_digest
 
     def configure_index(self):
         self._index.clear()
