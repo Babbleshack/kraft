@@ -33,14 +33,21 @@ import os
 import shutil
 import tempfile 
 import tarfile
-from enum import Enum, unique
+from kraft.package.oci.opencontainers.digest import Digest
 from kraft.package.oci.opencontainers.image.v1 import (
     Index,
-    Manifest
+    Manifest,
+)
+from kraft.package.oci.opencontainers.image.v1.config import (
+    ImageConfig,
+    Image,
+    RootFS,
+    History
 )
 from kraft.package.oci.opencontainers.digest  import (
     Canonical as default_digest_algorithm,
 )
+from kraft.package.oci.opencontainers.image.specs import Version
 from kraft.package.oci.opencontainers.digest.exceptions import ErrDigestInvalidFormat
 from kraft.package.oci.opencontainers.digest.algorithm import algorithms
 from kraft.error import KraftError
@@ -59,6 +66,7 @@ class Artifact:
         """
         self._path = path
         self._image_path = image_path
+        
 
     def create_digest(self, digester):
         """
@@ -68,12 +76,12 @@ class Artifact:
         _ = digester
         raise NotImplementedError()
 
-class Image(Artifact):
+class ImageWrapper(Artifact):
     # path where image should be stored inside osi-image
     _image_path = '/image/%s'
     def __init__(self, path, architecture, platform):
         """
-        Image is an artifact wrapping a path to an image, its architecture and
+        ImageWrapper is an artifact wrapping a path to an image, its architecture and
         platform it was built for.
 
         :param path to image.
@@ -82,9 +90,22 @@ class Image(Artifact):
         """
         image_name = os.path.basename(path)
         super().__init__(path, Image._image_path % image_name)
-        self._image_name = image_name
+        self._image = image_name
         self._architecture = architecture
         self._platform = platform 
+
+    @property
+    def image(self):
+        return self._image
+
+    @property
+    def architecture(self):
+        return self._architecture
+    
+    @property
+    def platform(self):
+        return self._platform
+
 
 class FileSystem(Artifact):
     # path where filesystem should be stored inside osi-image
@@ -110,15 +131,16 @@ Steps for packaing as oci_image tar
 [x] rootfs_tar_digest = shaXXX /tmp/image.tar.[gz|xz] 
 [x] move rootfs_tar to oci_image (e.g. /tmp/image/oci/blobs/shaXXX/`rootfs_tar_digest.encoded`
 
-[] init config object 
+[x] init config object 
+[x] add image config attribs
 [] config_digest = shaXXX config object
 [] write config object to /tmp/image/oci/blobs/shaXXX/`config_digest.encoded`
 
-[] Init Manifest object (config sha, layers sha)
+[x] Init Manifest object (config sha, layers sha)
 [] manifest_digest = shaXXX manfiest object
 [] write manifest object to /tmp/image/oci/blobs/shaXXX/`manifest_digest.encoded`  
 
-[] init index (manifest sha)
+[x] init index (manifest sha)
 [] write index to manifest /tmp/image/oci/index.json
 
 [] tar oci (e.g. tar czf /tmp/<image_id> /tmp/image/oci)
@@ -189,7 +211,7 @@ HASH_BUFF_SIZE = 1024 * 64 #64k
 class Packager:
     def __init__(
         self,
-        image="",
+        image=ImageWrapper(path=None, architecture=None, platform=None),
         filesystem="",
         uk_conf="",
         artifacts=[],
@@ -216,13 +238,14 @@ class Packager:
             raise KraftError(ValueError("Invalid path to image config"))
         if digest_algorithm not in algorithms:
             raise KraftError(ValueError("Invalid algorithm selected"))
-        self._image_path = image
+        self._image = image
         self._filesystem_path = filesystem 
         self._artifacts = artifacts
         self._uk_config = uk_conf
         self._digester = digest_algorithm.digester()
-        self._index = Index()
-        self._manifest = Manifest()
+        self._index = None
+        self._manifest = None
+        self._image_config = None
         self._hash_buff_size = hash_buffer_size
 
     def create_oci_filesystem(self):
@@ -231,12 +254,12 @@ class Packager:
         :return dict{'path': <path to tar>, 'digest': <digest over tared contents>}.
         """
         staging_dirs = TemporaryDirs.create_staging_dirs()
-        image_name = os.path.basename(self._image_path)
+        image_name = os.path.basename(self._image.path)
         image_path = '%s/%s' %(staging_dirs.get_path('image'), image_name) 
-        shutil.copy2(self._image_path, image_path)
+        shutil.copy2(self._image.path, image_path)
         if self._filesystem_path:
             fs_name = os.path.basename(self._filesystem_path)
-            shutil.copy(self._image_path, '%s/%s'
+            shutil.copy(self._image.path, '%s/%s'
                         %(staging_dirs.get_path('filesystem'), fs_name))
         ## copy artifacts/filesystem
 
@@ -261,19 +284,33 @@ class Packager:
             raise KraftError("Invalid rootfs digest: %s" % e)
         return tar_digest
 
-    def configure_index(self):
-        self._index.clear()
-        self._index.add("schemaVersion", OCI_IMAGE_SCHEMA_VERSION)
+    def create_oci_config(self, rootfs_digest=Digest()):
+        if not rootfs_digest.validate():
+            raise KraftError("Malformed digest value for rootfs")
+        self._image_config = Image(
+            arch=self._image.architecture,
+            rootfs=rootfs_digest,
+            imageOS="linux"
+        )
+        return self._image_config
 
-    def add_unikraft_config(self, config_path):
-        """
-        Add a unikraft unikernal config
-        """
-        ##itterate lines in config and create annotations
-        self._uk_config = config_path
+    def create_oci_manifest(self,
+                            config_digest=Digest(),
+                            layer_digests=[]):
+        self._manifest = Manifest(
+            manifestConfig=config_digest,
+            layers=layer_digests,
+            schemaVersion = Version
+        )
+        return self._manifest
 
-    def create_layer(self, artefacts): 
-        _ = self
-        _ = artefacts
-        raise NotImplementedError()
-
+    def configure_index(self, manifest_digests=list(Digest())):
+        for manifest in manifest_digests:
+            if not manifest.validate():
+                raise KraftError("Malformed manifest digest")
+        self._index = Index(
+            manifests=manifest_digests,
+            schemaVersion = Version
+        )
+        return self._index
+        
