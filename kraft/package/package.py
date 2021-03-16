@@ -34,28 +34,32 @@ import shutil
 import tempfile 
 import tarfile
 from kraft.package.oci.opencontainers.digest import Digest
+import kraft.package.oci.opencontainers.image.v1 as Imagev1
 from kraft.package.oci.opencontainers.image.v1 import (
     Index,
     Manifest,
+    Descriptor,
+    RootFS
 )
-from kraft.package.oci.opencontainers.image.v1.config import (
-    ImageConfig,
-    Image,
-    RootFS,
-    History
+import kraft.package.oci.opencontainers.image.v1.mediatype as MediaType
+from kraft.package.oci.opencontainers.image.v1.config import Image
+from kraft.package.oci.opencontainers.digest  import Canonical as default_digest_algorithm
+from kraft.package.oci.opencontainers.image.specs import (
+    Versioned,
+    Version
 )
-from kraft.package.oci.opencontainers.digest  import (
-    Canonical as default_digest_algorithm,
-)
-from kraft.package.oci.opencontainers.image.specs import Version
-from kraft.package.oci.opencontainers.digest.exceptions import ErrDigestInvalidFormat
 from kraft.package.oci.opencontainers.digest.algorithm import algorithms
+from kraft.package.oci.opencontainers.digest.exceptions import (
+    ErrDigestUnsupported,
+    ErrDigestInvalidLength,
+    ErrDigestInvalidFormat
+)
 from kraft.error import KraftError
 #from kraft.logger import logger
 
 OCI_IMAGE_SCHEMA_VERSION = 2
 
-class Artifact:
+class ArtifactWrapper:
     def __init__(self, path):
         """
         Artifact is a base class for wraping some arbitrary content which
@@ -70,15 +74,13 @@ class Artifact:
     def path(self):
         return self._path
         
-    def create_digest(self, digester):
+    def validate(self):
         """
-        returns a digest
+        validate artifact exists
         """
-        _ = self
-        _ = digester
-        raise NotImplementedError()
+        return os.path.isfile(self.path)
 
-class ImageWrapper(Artifact):
+class ImageWrapper(ArtifactWrapper):
     # path where image should be stored inside osi-image
     _image_path = '/image/%s'
     def __init__(self, path="", architecture="", platform="", uk_conf=""):
@@ -91,9 +93,6 @@ class ImageWrapper(Artifact):
         :param platform image was built for (e.g. kvm, xen).
         :param uk_conf path to configuration file for building uk image
         """
-        print("====================")
-        print(path)
-        print("====================")
         if not path:
             raise KraftError(ValueError("Invalid path to kernel image."))
         if not architecture:
@@ -126,17 +125,22 @@ class ImageWrapper(Artifact):
         return self._conf
 
 
-class FileSystem(Artifact):
+class FilesystemWrapper(ArtifactWrapper):
     # path where filesystem should be stored inside osi-image
     _image_path = '/filesystems/%s'
     def __init__(self, path):
         """
         Filesystem used by kernel
         """
-        fs_name = os.path.basename(path)
-        super().__init__(path, FileSystem._image_path % fs_name)
-        pass
+        _ = self
+        super().__init__(path)
 
+    @property
+    def name(self):
+        """
+        return filename of Filesystem
+        """
+        return os.path.basename(self._path)
 
 """
 Steps for packaing as oci_image tar
@@ -166,14 +170,17 @@ Steps for packaing as oci_image tar
 """
 
 class TemporaryDirs:
-    ROOT        = '%s'
-    ROOTFS      = '%s/rootfs'
-    IMAGE       = '%s/rootfs/image'
-    FILESYSTEM  = '%s/rootfs/filesystem'
-    ARTIFACTS   = '%s/rootfs/artifacts'
-    OCI_IMAGE   = '%s/oci'
-    OCI_BLOBS   = '%s/oci/blobs'
-    TARS        = '%s/tars' 
+    ROOT            = ('root', '%s')
+    ROOTFS          = ('rootfs', '%s/rootfs')
+    IMAGE           = ('image', '%s/rootfs/image')
+    FILESYSTEM      = ('filesystem', '%s/rootfs/filesystem')
+    ARTIFACTS       = ('artifacts', '%s/rootfs/artifacts')
+    OCI_IMAGE       = ('oci_image', '%s/oci')
+    OCI_BLOBS       = ('oci_blobs', '%s/oci/blobs')
+    OCI_BLOBS_SHA   = ('oci_blobs_sha', '%s/oci/blobs/%s')
+    OCI_INDEX       = ('oci_index', '%s/oci/index.json')
+    TARS            = ('tars', '%s/tars' )
+    SCRATCH         = ('scratch', '%s/scratch')
 
     def __init__(self, dirs):
         """
@@ -184,7 +191,10 @@ class TemporaryDirs:
         self._dirs = dirs
 
     @classmethod
-    def create_staging_dirs(cls):
+    def create(cls, sha):
+        # TODO check in valid algorithms
+        if not sha:
+            raise ValueError("sha must be set to legal sha algorithm")
         """
         Creates a temp directory for oci image.
         This method should be called to construct `TemporaryDirs`.
@@ -192,28 +202,32 @@ class TemporaryDirs:
         """
         temp_dir = tempfile.mkdtemp()
         temp = {
-            'root':         cls.ROOT % (temp_dir),
-            'rootfs':       cls.ROOTFS % (temp_dir),
-            'image':        cls.IMAGE % (temp_dir),
-            'filesystem':   cls.FILESYSTEM % (temp_dir),
-            'oci_image':    cls.OCI_IMAGE % (temp_dir),
-            'oci_blobs':    cls.OCI_BLOBS % (temp_dir),
-            'tars':         cls.TARS % (temp_dir) # temp location for tars
+            cls.ROOT[0]:            cls.ROOT[1] % (temp_dir),
+            cls.ROOTFS[0]:          cls.ROOTFS[1] % (temp_dir),
+            cls.IMAGE[0]:           cls.IMAGE[1] % (temp_dir),
+            cls.FILESYSTEM[0]:      cls.FILESYSTEM[1] % (temp_dir),
+            cls.OCI_IMAGE[0]:       cls.OCI_IMAGE[1] % (temp_dir),
+            cls.OCI_BLOBS[0]:       cls.OCI_BLOBS[1] % (temp_dir),
+            cls.OCI_BLOBS_SHA[0]:   cls.OCI_BLOBS_SHA[1] %(temp_dir, sha),
+            cls.OCI_INDEX[0]:       cls.OCI_INDEX[1] % (temp_dir),
+            cls.TARS[0]:            cls.TARS[1] % (temp_dir), # temp location for tars
+            cls.SCRATCH[0]:         cls.SCRATCH[1] % (temp_dir)
             #'artifacts':   '%s/rootfs/artifacts' % (temp_dir),
         }
+        skip = [cls.ROOT[0], cls.OCI_INDEX[0]]
         ## dont need to check if dir already exists -- tmp file
         for key, dir in temp.items():
-            #skip root this is the temo dir
-            if key == 'root':
+            #skip some dirs
+            if key in  skip:
                 continue
             os.mkdir(dir)
         return TemporaryDirs(temp)
 
-    def delete_staging_dir(self):
+    def delete(self):
         """
         Delete temporary directory.
         """
-        os.rmdir(self._dirs['root'])
+        shutil.rmtree(self._dirs[self.ROOT[0]])
 
     def get_path(self, key): 
         """
@@ -225,23 +239,100 @@ class TemporaryDirs:
             raise ValueError("Invalid directory key: %s" % key)
         return self._dirs[key]
 
+    def get_config_path(self, config_hash):
+        path = self._dirs[self.__class__.OCI_BLOBS_SHA[0]]
+        return "%s/%s" %(path, config_hash)
+
+    def get_blob_path(self, digest_hash):
+        return "%s/%ss" % (self._dirs['oci_blobs_sha'], digest_hash)
+
+def _validate(manifest):
+    """
+    _validate some oci struct
+    :raise KraftError if struct is invalid
+    """
+    try:
+        manifest.validate()
+    except ErrDigestUnsupported as e:
+        raise KraftError("Malformed rootfs digest: %s" % e)
+    except ErrDigestInvalidLength as e:
+        raise KraftError("Malformed rootfs digest: %s" % e)
+    except ErrDigestInvalidFormat as e:
+        raise KraftError("Malformed rootfs digest: %s" % e)
+
+class DigestWrapper:
+    def __init__(self, digest, path, media_type):
+        """
+        DigestWrapper wraps a digest and a path to the file referenced by the
+        digest.
+        :param digest to wrap.
+        :param path to file digest references.
+        :param media_type is oci media type
+        """
+        self._digest = digest
+        self._path = path
+        self._media_type = media_type
+
+    @property
+    def digest(self):
+        """
+        digest of the artifact
+        """
+        return self._digest
+
+    @property
+    def path(self):
+        """
+        path to artifact
+        """
+        return self._path
+
+    @property
+    def media_type(self):
+        """
+        oci mediatype of the artifact the digest references
+        """
+        return self._media_type
+
+    @property
+    def size(self):
+        """
+        size of the artifact
+        :raise KraftError if file cannot be accessed.
+        """
+        if not os.path.isfile(self._path):
+            raise KraftError("Error can not access %s" % self._path)
+        return os.path.getsize(self._path)
+
+    @property
+    def descriptor(self):
+        """
+        return a descriptor of the wrapped digest
+        """
+        return Descriptor(
+            digest = self.digest,
+            mediatype = self.media_type,
+            size = self.size)
+
 ## TODO: figure out how to pass class/static var as default __init__ param
 HASH_BUFF_SIZE = 1024 * 64 #64k
+## TODO: refactor duplicate code
 class Packager:
     def __init__(
         self,
         #image=ImageWrapper(path=None, architecture=None, platform=None, uk_conf=None),
-        image="",
-        filesystem="",
-        artifacts=[],
+        image: ImageWrapper = None,
+        filesystem: FilesystemWrapper = None,
+        artifacts: list[ArtifactWrapper] = None,
         digest_algorithm=default_digest_algorithm,
-        hash_buffer_size=HASH_BUFF_SIZE
+        hash_buffer_size=HASH_BUFF_SIZE,
+        temporary_dirs: TemporaryDirs = None
     ):
         """
         Package wraps a collection of artifacts and a kernel image into the oci
         image format.
 
-        :param image is the path to kernel image.
+        :param image is a ImageWrapper object 
         :param filesystem path to filesystem image (e.g. initrd)
         :param artifacts is a list of type `Artifact` encapsulating arbitrary data.
         :param digest_algorithm is the algorithm used.
@@ -254,26 +345,33 @@ class Packager:
             raise KraftError(ValueError("image must be set"))
         if digest_algorithm not in algorithms:
             raise KraftError(ValueError("Invalid algorithm selected"))
+        if not temporary_dirs:
+            temporary_dirs = TemporaryDirs.create(digest_algorithm)
         self._image = image
-        self._filesystem_path = filesystem 
+        self._filesystem = filesystem 
         self._artifacts = artifacts
-        self._digester = digest_algorithm.digester()
+        self._digest_algo = digest_algorithm
         self._hash_buff_size = hash_buffer_size
         self._index = None
         self._manifest = None
         self._image_config = None
+        self._filesystem_tar_digest = None
+        self._temporary_dirs = temporary_dirs
 
-    def create_oci_filesystem(self):
+    def create_oci_filesystem(self) -> DigestWrapper:
         """
         create_oci_filesystem creates OCI Image rootfs, tars it and creates a digest.
-        :return dict{'path': <path to tar>, 'digest': <digest over tared contents>}.
+        :return tar_rootfs_path to rootfs
+            digest string of rootfs tar
+            staging_directories temp fs storing artifacts
         """
-        staging_dirs = TemporaryDirs.create_staging_dirs()
+        digester = self._digest_algo.digester()
+        staging_dirs = TemporaryDirs.create(digester.digest().algorithm.value)
         image_name = os.path.basename(self._image.path)
         image_path = '%s/%s' %(staging_dirs.get_path('image'), image_name) 
         shutil.copy2(self._image.path, image_path)
-        if self._filesystem_path:
-            fs_name = os.path.basename(self._filesystem_path)
+        if self._filesystem:
+            fs_name = os.path.basename(self._filesystem.path)
             shutil.copy(self._image.path, '%s/%s'
                         %(staging_dirs.get_path('filesystem'), fs_name))
         ## copy artifacts/filesystem
@@ -282,50 +380,125 @@ class Packager:
         tar_rootfs_path = '%s/%s' % (staging_dirs.get_path('tars'), 'rootfs.tar.gz')
         with tarfile.open(tar_rootfs_path, "w:gz") as tar:
             tar.add(staging_dirs.get_path('rootfs'), arcname='/rootfs')
-        tar_digest = {
-            'path': tar_rootfs_path,
-            'digest': None
-        }
+        digest = None
         ## Create digests
         with open(tar_rootfs_path, 'rb') as f:
             data = f.read(self._hash_buff_size)
             while data:
-                self._digester.hash.update(data)
+                digester.hash.update(data)
                 data = f.read(self._hash_buff_size)
-            tar_digest['digest'] = self._digester.digest() 
+            digest = digester.digest()
         try:
-            tar_digest['digest'].validate()
-        except ErrDigestInvalidFormat as e:
-            raise KraftError("Invalid rootfs digest: %s" % e)
-        return tar_digest
-
-    def create_oci_config(self, rootfs_digest=Digest()):
-        if not rootfs_digest.validate():
-            raise KraftError("Malformed digest value for rootfs")
-        self._image_config = Image(
-            arch=self._image.architecture,
-            rootfs=rootfs_digest,
-            imageOS="linux"
+            _validate(digest)
+        except KraftError as e:
+            raise e
+        self._filesystem_tar_digest = digest
+        return DigestWrapper(
+            digest = digest,
+            path = tar_rootfs_path,
+            media_type = MediaType.MediaTypeImageLayerGzip
         )
-        return self._image_config
+
+    def create_oci_config(self, 
+                          rootfs_digest: DigestWrapper) -> DigestWrapper:
+        try:
+            _validate(rootfs_digest.digest)
+        except KraftError as e:
+            raise e
+        rootfs_d = {
+            "type": "layers",
+            "diff_ids": [rootfs_digest.digest]
+        }
+        #rootfs = RootFS(rootfs_type="layers", diff_ids=[rootfs_digest.digest])
+        image_config = Image(
+            arch=self._image.architecture,
+            imageOS="linux",
+            rootfs=rootfs_d
+        )
+        try:
+            _validate(image_config)
+        except KraftError as e:
+            raise e
+        self._image_config = image_config
+        # write to scracth, get digest move to oci path
+        scratch_file = "%s/config.json" %(self._temporary_dirs.get_path('scratch'))
+        with open(scratch_file, "w") as f:
+            f.write(image_config.to_json())
+        digester = self._digest_algo.digester()
+        digest = ""
+        with open(scratch_file, 'rb') as f:
+            data = f.read(self._hash_buff_size)
+            while data:
+                digester.hash.update(data)
+                data = f.read(self._hash_buff_size)
+            digest = digester.digest()
+        try:
+            _validate(digest)
+        except KraftError as e:
+            raise e
+        digest_path = "%s/%s" %(self._temporary_dirs.get_path('oci_blobs_sha'), digest.encoded())
+        p = shutil.move(scratch_file, digest_path)
+        try:
+            _validate(digest)
+        except KraftError as e:
+            raise e
+        return DigestWrapper(
+            digest = digest,
+            path = digest_path,
+            media_type = MediaType.MediaTypeImageConfig
+        )
 
     def create_oci_manifest(self,
-                            config_digest=Digest(),
-                            layer_digests=[]):
-        self._manifest = Manifest(
-            manifestConfig=config_digest,
-            layers=layer_digests,
-            schemaVersion = Version
+                            config_digest: DigestWrapper,
+                            layer_digests: list[DigestWrapper]) -> DigestWrapper:
+        conf_descriptor = config_digest.descriptor
+        layer_descriptors = [dw.descriptor for dw in layer_digests]
+        layers_d = [dw.to_dict() for dw in layer_descriptors]
+        manifest = Imagev1.Manifest(
+            manifestConfig=conf_descriptor.to_dict(),
+            layers=layers_d,
+            schemaVersion = Versioned(2)
         )
-        return self._manifest
+        # write 
+        scratch_file = "%s/manifest.json" %(self._temporary_dirs.get_path('scratch'))
+        #print("versioned %s"  % Versioned(2))
+        #print("manifest %s"  % manifest)
+        #print("manifest vars %s"  % vars(manifest))
+        #print("manifest dict %s" % manifest.to_dict())
+        #print("manifest json %s" % manifest.to_json())
+        with open(scratch_file, "w") as f:
+            f.write(manifest.to_json())
+        digester = self._digest_algo.digester()
+        digest = ""
+        with open(scratch_file, 'rb') as f:
+            data = f.read(self._hash_buff_size)
+            while data:
+                digester.hash.update(data)
+                data = f.read(self._hash_buff_size)
+            digest = digester.digest()
+        try:
+            _validate(digest)
+        except KraftError as e:
+            raise e
+        digest_path = self._temporary_dirs.get_blob_path(digest.encoded())
+        shutil.move(scratch_file, digest_path)
+        return DigestWrapper(
+            digest = digest,
+            path = digest_path,
+            media_type = MediaType.MediaTypeImageManifest
+        )
 
-    def configure_index(self, manifest_digests=list(Digest())):
-        for manifest in manifest_digests:
-            if not manifest.validate():
-                raise KraftError("Malformed manifest digest")
-        self._index = Index(
-            manifests=manifest_digests,
-            schemaVersion = Version
+    def create_index(self, manifest_digests: list[DigestWrapper]) -> str:
+        manifest_descriptors = [dw.descriptor.to_dict() for dw in manifest_digests]
+        index = Index(
+            manifests=manifest_descriptors,
+            schemaVersion=2
         )
-        return self._index
-        
+        try:
+            _validate(index)
+        except KraftError as e:
+            raise e
+        index_path = self._temporary_dirs.get_path(self._temporary_dirs.OCI_INDEX[0])
+        with open(index_path, "w") as f:
+            f.write(index.to_json())
+        return index_path
