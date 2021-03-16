@@ -393,9 +393,12 @@ class Packager:
         except KraftError as e:
             raise e
         self._filesystem_tar_digest = digest
+        #move to oci dir
+        digest_path = "%s/%s" %(self._temporary_dirs.get_path('oci_blobs_sha'), digest.encoded())
+        shutil.move(tar_rootfs_path, digest_path)
         return DigestWrapper(
             digest = digest,
-            path = tar_rootfs_path,
+            path = digest_path,
             media_type = MediaType.MediaTypeImageLayerGzip
         )
 
