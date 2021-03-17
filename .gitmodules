@@ -1,3 +1,0 @@
-[submodule "kraft/package/oci"]
-	path = kraft/package/oci
-	url = git@github.com:kubekraft/oci-python.git

@@ -36,15 +36,15 @@ from kraft.package.package import (
     ImageWrapper,
     FilesystemWrapper,
     ArtifactWrapper,
-    Packager
+    Packager,
+    compression_algorithms
 )
-from kraft.package.oci.opencontainers.digest.algorithm import algorithms 
+from opencontainers.digest.algorithm import algorithms 
 from kraft.error import KraftError
 from kraft.logger import logger
 
-@click.pass_context
 def kraft_package(ctx, kernel=None, arch=None, platform=None, config=None,
-                  filesystem_path="", artifact_paths=[], hash_algo="sha256"):
+                  filesystem_path=None, artifact_paths=[], hash_algo=None, compression=None):
     if hash_algo not in algorithms.keys():
         raise KraftError("Error invalid hash algorithm, valid algorithms: %s" %
                          ", ".join(algorithms.keys()))
@@ -65,7 +65,8 @@ def kraft_package(ctx, kernel=None, arch=None, platform=None, config=None,
             image=image,
             filesystem=fs,
             artifacts=artifacts,
-            digest_algorithm=hash_algo
+            digest_algorithm=hash_algo,
+            compression_algorithm=compression
         )
         fs_dw = packager.create_oci_filesystem()
         conf_dw = packager.create_oci_config(fs_dw)
@@ -87,10 +88,11 @@ def kraft_package(ctx, kernel=None, arch=None, platform=None, config=None,
 @click.option('--artifact', '-r', 'artifact_paths', 
               multiple=True,
               type=click.Path(exists=True, readable=True))
-@click.option('--hash-type', '-h', 'hash_algo', 
-              type=click.Choice(algorithms.keys()),
-              case_sensitive=False)
-@click.argument('image', 
+@click.option('--hash-type', '-h', default="sha256",
+              type=click.Choice(algorithms.keys(), case_sensitive=False))
+@click.option('--compression-algorithm', '-h', 'compression', default="gzip",
+              type=click.Choice(compression_algorithms.keys(), case_sensitive=False))
+@click.argument('image',
                 type=click.Path(exists=True),
                 required=True)
 @click.argument('architecture', required=True)
@@ -98,21 +100,26 @@ def kraft_package(ctx, kernel=None, arch=None, platform=None, config=None,
 @click.argument('config',
                 type=click.Path(exists=True),
                 required=True)
-def cmd_package(ctx, kernel=None, arch=None, platform=None, config=None,
-                  filesystem_path="", artifact_paths=[], hash_algo="sha256"):
+@click.pass_context
+def cmd_package(ctx, image=None, architecture=None, platform=None, config=None,
+                filesystem_path=None, artifact_paths=[], hash_type=None,
+                compression=None):
     """
     Packages a Unikraft application as an OCI Image
     """
+    hash_type = hash_type.lower()
+    compression = compression.lower()
     try:
         kraft_package(
             ctx,
-            kernel=kernel,
-            arch=arch,
+            kernel=image,
+            arch=architecture,
             platform=platform,
             config=config,
             filesystem_path=filesystem_path,
             artifact_paths=artifact_paths,
-            hash_algo=hash_algo
+            hash_algo=hash_type,
+            compression=compression
         )
     except Exception as e:
         logger.critical(str(e))

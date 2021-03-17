@@ -33,24 +33,29 @@ import os
 import shutil
 import tempfile 
 import tarfile
-from typing import Tuple
-from kraft.package.oci.opencontainers.digest import Algorithm 
-import kraft.package.oci.opencontainers.image.v1 as Imagev1
-from kraft.package.oci.opencontainers.image.v1 import (
+from typing import (
+    Tuple,
+    List
+)
+from opencontainers.digest import Algorithm 
+import opencontainers.image.v1 as Imagev1
+from opencontainers.image.v1 import (
     Index,
     Descriptor,
 )
-import kraft.package.oci.opencontainers.image.v1.mediatype as MediaType
-from kraft.package.oci.opencontainers.image.v1.config import Image
-from kraft.package.oci.opencontainers.digest  import Canonical as default_digest_algorithm
-from kraft.package.oci.opencontainers.image.specs import Versioned 
-from kraft.package.oci.opencontainers.digest.algorithm import algorithms
-from kraft.package.oci.opencontainers.digest.exceptions import (
+import opencontainers.image.v1.mediatype as MediaType
+from opencontainers.image.v1.config import Image
+from opencontainers.digest  import Canonical as default_digest_algorithm
+from opencontainers.image.specs import Versioned 
+from opencontainers.digest.algorithm import algorithms
+from opencontainers.digest.exceptions import (
     ErrDigestUnsupported,
     ErrDigestInvalidLength,
     ErrDigestInvalidFormat
 )
 from kraft.error import KraftError
+
+
 
 ## TODO: get schema version from opencontainers package
 OCI_IMAGE_SCHEMA_VERSION = 2
@@ -314,9 +319,7 @@ def _move_digest(temp_path=None, digest_path=None):
         raise KraftError("Unable to access file at path %s" % temp_path)
     shutil.move(temp_path, digest_path)
 
-def _make_tar(path: str, 
-              files: list[Tuple[str, str]] = None,
-              compression="gzip"):
+def _make_tar(path: str, files: List[Tuple[str, str]] = None, compression=""):
     """
     _make_tar at `path` containing `files`
     :param path to to tar archive
@@ -337,10 +340,11 @@ class Packager:
         self,
         image: ImageWrapper = None,
         filesystem: FilesystemWrapper = None,
-        artifacts: list[ArtifactWrapper] = None,
+        artifacts: List[ArtifactWrapper] = None,
         digest_algorithm=default_digest_algorithm,
         hash_buffer_size=HASH_BUFF_SIZE,
-        temporary_dirs: TemporaryDirs = None
+        temporary_dirs: TemporaryDirs = None,
+        compression_algorithm = None
     ):
         """
         Package wraps a collection of artifacts and a kernel image into the oci
@@ -364,9 +368,10 @@ class Packager:
         self._image = image
         self._filesystem = filesystem 
         self._artifacts = artifacts
-        self._digest_algo = digest_algorithm
+        self._digest_algo = Algorithm(digest_algorithm)
         self._hash_buff_size = hash_buffer_size
         self._temporary_dirs = temporary_dirs
+        self._compression_algo = compression_algorithm
         self._index = None
         self._manifest = None
         self._image_config = None
@@ -394,7 +399,7 @@ class Packager:
         ## tar up rootfs
         tar_rootfs_path = '%s/%s' % (self._temporary_dirs.get_path('tars'), 'rootfs.tar.gz')
         tar_tuple = (self._temporary_dirs.get_path('rootfs'), '/rootfs')
-        _make_tar(tar_rootfs_path, [tar_tuple])
+        _make_tar(tar_rootfs_path, [tar_tuple], self._compression_algo)
         digest = None
         try:
             digest = _create_digest(tar_rootfs_path, self._digest_algo)
@@ -450,7 +455,7 @@ class Packager:
 
     def create_oci_manifest(self,
                             config_digest: DigestWrapper,
-                            layer_digests: list[DigestWrapper]) -> DigestWrapper:
+                            layer_digests: List[DigestWrapper]) -> DigestWrapper:
         conf_descriptor = config_digest.descriptor
         layer_descriptors = [dw.descriptor for dw in layer_digests]
         layers_d = [dw.to_dict() for dw in layer_descriptors]
@@ -476,7 +481,7 @@ class Packager:
             media_type = MediaType.MediaTypeImageManifest
         )
 
-    def create_index(self, manifest_digests: list[DigestWrapper]) -> str:
+    def create_index(self, manifest_digests: List[DigestWrapper]) -> str:
         manifest_descriptors = [dw.descriptor.to_dict() for dw in manifest_digests]
         index = Index(
             manifests=manifest_descriptors,
@@ -502,7 +507,7 @@ class Packager:
             path = self._temporary_dirs.get_path(TemporaryDirs.OCI_IMAGE[0])
         files = [ (path, "/") ]
         try:
-            _make_tar(out, files)
+            _make_tar(out, files, self._compression_algo)
         except KraftError as e:
             raise e
 
