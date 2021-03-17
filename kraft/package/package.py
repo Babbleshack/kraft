@@ -33,8 +33,15 @@ import os
 import shutil
 import tempfile 
 import tarfile
-from kraft.package.oci.opencontainers.digest import Digest
+from typing import Tuple
+
+from kraft.package.oci.opencontainers.digest import (
+    Digest,
+    Algorithm,
+    digester
+)
 import kraft.package.oci.opencontainers.image.v1 as Imagev1
+from kraft.package.oci.opencontainers.struct import Struct
 from kraft.package.oci.opencontainers.image.v1 import (
     Index,
     Manifest,
@@ -142,33 +149,6 @@ class FilesystemWrapper(ArtifactWrapper):
         """
         return os.path.basename(self._path)
 
-"""
-Steps for packaing as oci_image tar
-[x] Create temporary directory (e.g. /tmp/image/)
-[x] Create oci_imge temp dir (e.g /tmp/image/oci)
-
-[x] Create rootfs (e.g. /tmp/image/rootfs)
-
-[x] Move artefacts to temp root fs (e.g. /tmp/image/rootfs/image/xxxx)
-[x] tar temp rootfs -> /tmp/image/rootfs.tar.[gz|xz]
-[x] rootfs_tar_digest = shaXXX /tmp/image.tar.[gz|xz] 
-[x] move rootfs_tar to oci_image (e.g. /tmp/image/oci/blobs/shaXXX/`rootfs_tar_digest.encoded`
-
-[x] init config object 
-[x] add image config attribs
-[] config_digest = shaXXX config object
-[] write config object to /tmp/image/oci/blobs/shaXXX/`config_digest.encoded`
-
-[x] Init Manifest object (config sha, layers sha)
-[] manifest_digest = shaXXX manfiest object
-[] write manifest object to /tmp/image/oci/blobs/shaXXX/`manifest_digest.encoded`  
-
-[x] init index (manifest sha)
-[] write index to manifest /tmp/image/oci/index.json
-
-[] tar oci (e.g. tar czf /tmp/<image_id> /tmp/image/oci)
-"""
-
 class TemporaryDirs:
     ROOT            = ('root', '%s')
     ROOTFS          = ('rootfs', '%s/rootfs')
@@ -229,7 +209,7 @@ class TemporaryDirs:
         """
         shutil.rmtree(self._dirs[self.ROOT[0]])
 
-    def get_path(self, key): 
+    def get_path(self, key) -> str: 
         """
         Get a path managed by TemporaryDirs
         :return path
@@ -314,6 +294,57 @@ class DigestWrapper:
             mediatype = self.media_type,
             size = self.size)
 
+def _create_digest(
+        path="",
+        algo: Algorithm = None,
+        buff_size = 1024 * 60):
+    """
+    _create_digest and _validate()
+    :raise KraftError if path is not accessible or digest is invalid
+    """
+    if not os.path.isfile(path) | os.path.isdir(path):
+        raise KraftError("Error path is not accesible")
+    digest = ""
+    digester = algo.digester()
+    with open(path, 'rb') as f:
+        data = f.read(buff_size)
+        while data:
+            digester.hash.update(data)
+            data = f.read(buff_size)
+    digest = digester.digest()
+    try:
+        _validate(digest)
+    except KraftError as e:
+        raise e
+    return digest
+
+def _move_to_digest_path(temp_path=None, digest_path=None):
+    if None in (temp_path, digest_path):
+        raise KraftError("Error paths must not be None")
+    shutil.move(temp_path, digest_path)
+
+
+## TODO: Add zstd support
+compression_algorithms = {"tar": "w", "gzip": "w:gz"}
+
+def _make_tar(path: str, 
+              files: list[Tuple[str, str]] = None,
+              compression="gzip"):
+    """
+    _make_tar at `path` containing `files`
+    :param path to to tar archive
+    :param files is a tupe of (path_to_file, arcname), encapsulating a path to a file
+        and the path the file will be stored at in the archive
+    :param compression is one of the `compression_algorithms` keys
+    :raise KraftError if invalid compression key is chosen
+    :raise KraftError if digest fails to validate
+    """
+    if not compression in compression_algorithms.keys():
+        raise KraftError("Unsupported compression algorithm")
+    with tarfile.open(path, compression_algorithms[compression]) as tar:
+        for file in files:
+            tar.add(file[0], arcname=file[1])
+
 ## TODO: figure out how to pass class/static var as default __init__ param
 HASH_BUFF_SIZE = 1024 * 64 #64k
 ## TODO: refactor duplicate code
@@ -378,24 +409,19 @@ class Packager:
 
         ## tar up rootfs
         tar_rootfs_path = '%s/%s' % (staging_dirs.get_path('tars'), 'rootfs.tar.gz')
+        tar_tuple = (staging_dirs.get_path('rootfs'), '/rootfs')
+        _make_tar(tar_rootfs_path, [tar_tuple])
         with tarfile.open(tar_rootfs_path, "w:gz") as tar:
             tar.add(staging_dirs.get_path('rootfs'), arcname='/rootfs')
         digest = None
-        ## Create digests
-        with open(tar_rootfs_path, 'rb') as f:
-            data = f.read(self._hash_buff_size)
-            while data:
-                digester.hash.update(data)
-                data = f.read(self._hash_buff_size)
-            digest = digester.digest()
         try:
-            _validate(digest)
+            digest = _create_digest(tar_rootfs_path, self._digest_algo)
         except KraftError as e:
             raise e
         self._filesystem_tar_digest = digest
         #move to oci dir
         digest_path = "%s/%s" %(self._temporary_dirs.get_path('oci_blobs_sha'), digest.encoded())
-        shutil.move(tar_rootfs_path, digest_path)
+        _move_to_digest_path(tar_rootfs_path, digest_path)
         return DigestWrapper(
             digest = digest,
             path = digest_path,
@@ -427,24 +453,13 @@ class Packager:
         scratch_file = "%s/config.json" %(self._temporary_dirs.get_path('scratch'))
         with open(scratch_file, "w") as f:
             f.write(image_config.to_json())
-        digester = self._digest_algo.digester()
-        digest = ""
-        with open(scratch_file, 'rb') as f:
-            data = f.read(self._hash_buff_size)
-            while data:
-                digester.hash.update(data)
-                data = f.read(self._hash_buff_size)
-            digest = digester.digest()
+        digest = None
         try:
-            _validate(digest)
+            digest = _create_digest( path = scratch_file, algo = self._digest_algo)
         except KraftError as e:
             raise e
         digest_path = "%s/%s" %(self._temporary_dirs.get_path('oci_blobs_sha'), digest.encoded())
-        p = shutil.move(scratch_file, digest_path)
-        try:
-            _validate(digest)
-        except KraftError as e:
-            raise e
+        _move_to_digest_path(scratch_file, digest_path)
         return DigestWrapper(
             digest = digest,
             path = digest_path,
@@ -464,27 +479,15 @@ class Packager:
         )
         # write 
         scratch_file = "%s/manifest.json" %(self._temporary_dirs.get_path('scratch'))
-        #print("versioned %s"  % Versioned(2))
-        #print("manifest %s"  % manifest)
-        #print("manifest vars %s"  % vars(manifest))
-        #print("manifest dict %s" % manifest.to_dict())
-        #print("manifest json %s" % manifest.to_json())
         with open(scratch_file, "w") as f:
             f.write(manifest.to_json())
-        digester = self._digest_algo.digester()
-        digest = ""
-        with open(scratch_file, 'rb') as f:
-            data = f.read(self._hash_buff_size)
-            while data:
-                digester.hash.update(data)
-                data = f.read(self._hash_buff_size)
-            digest = digester.digest()
+        digest = None
         try:
-            _validate(digest)
+            digest = _create_digest(path = scratch_file, algo = self._digest_algo)
         except KraftError as e:
             raise e
         digest_path = self._temporary_dirs.get_blob_path(digest.encoded())
-        shutil.move(scratch_file, digest_path)
+        _move_to_digest_path(scratch_file, digest_path)
         return DigestWrapper(
             digest = digest,
             path = digest_path,
