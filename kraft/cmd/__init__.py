@@ -48,3 +48,4 @@ from .list import cmd_list_update
 from .menuconfig import cmd_menuconfig
 from .run import cmd_run
 from .up import cmd_up
+from .package import cmd_package
