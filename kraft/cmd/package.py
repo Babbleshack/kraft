@@ -29,25 +29,90 @@
 # CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
 # ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
 # POSSIBILITY OF SUCH DAMAGE.
-
+import sys
+import os
 import click
-
+from kraft.package.package import (
+    ImageWrapper,
+    FilesystemWrapper,
+    ArtifactWrapper,
+    Packager
+)
+from kraft.package.oci.opencontainers.digest.algorithm import algorithms 
+from kraft.error import KraftError
 from kraft.logger import logger
 
 @click.pass_context
-def kraft_package(ctx, kernel=None, blobs=None):
-    raise NotImplementedError()
+def kraft_package(ctx, kernel=None, arch=None, platform=None, config=None,
+                  filesystem_path="", artifact_paths=[], hash_algo="sha256"):
+    if hash_algo not in algorithms.keys():
+        raise KraftError("Error invalid hash algorithm, valid algorithms: %s" %
+                         ", ".join(algorithms.keys()))
+    fs = None
+    if filesystem_path:
+        fs = FilesystemWrapper(path = filesystem_path)
+    artifacts = []
+    for artifact in artifact_paths:
+        artifacts.append( ArtifactWrapper(path=artifact))
+    image = ImageWrapper(
+        path=kernel,
+        architecture=arch,
+        platform=platform,
+        uk_conf=config
+    )
+    try:
+        packager = Packager(
+            image=image,
+            filesystem=fs,
+            artifacts=artifacts,
+            digest_algorithm=hash_algo
+        )
+        fs_dw = packager.create_oci_filesystem()
+        conf_dw = packager.create_oci_config(fs_dw)
+        manifest_dw = packager.create_oci_manifest(config_digest=conf_dw,
+                                                   layer_digests=[fs_dw])
+        packager.create_index(manifest_digests=[manifest_dw])
+        if not os.path.isdir("./package"):
+            os.mkdir("./package")
+        package_path = "./package/%s" % os.path.basename(image.path)
+        packager.create_oci_archive(package_path)
+        packager.clean_temporary_dirs()
+    except Exception as e:
+        raise e
 
 
+#TODO we can inteligently guess config and image paths?
 @click.command('package', short_help='package Unikraft unikernel as a OCI-Image')
-def cmd_package(ctx, kernel=None, blobs=None):
+@click.option('--filesystem', '-fs', 'filesystem_path')
+@click.option('--artifact', '-r', 'artifact_paths', 
+              multiple=True,
+              type=click.Path(exists=True, readable=True))
+@click.option('--hash-type', '-h', 'hash_algo', 
+              type=click.Choice(algorithms.keys()),
+              case_sensitive=False)
+@click.argument('image', 
+                type=click.Path(exists=True),
+                required=True)
+@click.argument('architecture', required=True)
+@click.argument('platform', required=True)
+@click.argument('config',
+                type=click.Path(exists=True),
+                required=True)
+def cmd_package(ctx, kernel=None, arch=None, platform=None, config=None,
+                  filesystem_path="", artifact_paths=[], hash_algo="sha256"):
     """
     Packages a Unikraft application as an OCI Image
     """
     try:
         kraft_package(
+            ctx,
             kernel=kernel,
-            blobs=blobs
+            arch=arch,
+            platform=platform,
+            config=config,
+            filesystem_path=filesystem_path,
+            artifact_paths=artifact_paths,
+            hash_algo=hash_algo
         )
     except Exception as e:
         logger.critical(str(e))
@@ -55,5 +120,4 @@ def cmd_package(ctx, kernel=None, blobs=None):
         if ctx.obj.verbose:
             import traceback
             logger.critical(traceback.format_exc())
-
         sys.exit(1)

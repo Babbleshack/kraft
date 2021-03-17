@@ -34,27 +34,16 @@ import shutil
 import tempfile 
 import tarfile
 from typing import Tuple
-
-from kraft.package.oci.opencontainers.digest import (
-    Digest,
-    Algorithm,
-    digester
-)
+from kraft.package.oci.opencontainers.digest import Algorithm 
 import kraft.package.oci.opencontainers.image.v1 as Imagev1
-from kraft.package.oci.opencontainers.struct import Struct
 from kraft.package.oci.opencontainers.image.v1 import (
     Index,
-    Manifest,
     Descriptor,
-    RootFS
 )
 import kraft.package.oci.opencontainers.image.v1.mediatype as MediaType
 from kraft.package.oci.opencontainers.image.v1.config import Image
 from kraft.package.oci.opencontainers.digest  import Canonical as default_digest_algorithm
-from kraft.package.oci.opencontainers.image.specs import (
-    Versioned,
-    Version
-)
+from kraft.package.oci.opencontainers.image.specs import Versioned 
 from kraft.package.oci.opencontainers.digest.algorithm import algorithms
 from kraft.package.oci.opencontainers.digest.exceptions import (
     ErrDigestUnsupported,
@@ -62,9 +51,14 @@ from kraft.package.oci.opencontainers.digest.exceptions import (
     ErrDigestInvalidFormat
 )
 from kraft.error import KraftError
-#from kraft.logger import logger
 
+## TODO: get schema version from opencontainers package
 OCI_IMAGE_SCHEMA_VERSION = 2
+## TODO: figure out how to pass class/static var as default __init__ param
+HASH_BUFF_SIZE = 1024 * 64 #64k
+## TODO: Add zstd support
+#ZSTD="zstd"
+compression_algorithms = {"tar": "w", "gzip": "w:gz"}
 
 class ArtifactWrapper:
     def __init__(self, path):
@@ -89,7 +83,6 @@ class ArtifactWrapper:
 
 class ImageWrapper(ArtifactWrapper):
     # path where image should be stored inside osi-image
-    _image_path = '/image/%s'
     def __init__(self, path="", architecture="", platform="", uk_conf=""):
         """
         ImageWrapper is an artifact wrapping a path to an image, its architecture and
@@ -131,23 +124,13 @@ class ImageWrapper(ArtifactWrapper):
     def config(self):
         return self._conf
 
-
 class FilesystemWrapper(ArtifactWrapper):
-    # path where filesystem should be stored inside osi-image
-    _image_path = '/filesystems/%s'
     def __init__(self, path):
         """
         Filesystem used by kernel
         """
         _ = self
         super().__init__(path)
-
-    @property
-    def name(self):
-        """
-        return filename of Filesystem
-        """
-        return os.path.basename(self._path)
 
 class TemporaryDirs:
     ROOT            = ('root', '%s')
@@ -186,6 +169,7 @@ class TemporaryDirs:
             cls.ROOTFS[0]:          cls.ROOTFS[1] % (temp_dir),
             cls.IMAGE[0]:           cls.IMAGE[1] % (temp_dir),
             cls.FILESYSTEM[0]:      cls.FILESYSTEM[1] % (temp_dir),
+            cls.ARTIFACTS[0]:       cls.ARTIFACTS[1] % (temp_dir),
             cls.OCI_IMAGE[0]:       cls.OCI_IMAGE[1] % (temp_dir),
             cls.OCI_BLOBS[0]:       cls.OCI_BLOBS[1] % (temp_dir),
             cls.OCI_BLOBS_SHA[0]:   cls.OCI_BLOBS_SHA[1] %(temp_dir, sha),
@@ -318,14 +302,17 @@ def _create_digest(
         raise e
     return digest
 
-def _move_to_digest_path(temp_path=None, digest_path=None):
+def _move_digest(temp_path=None, digest_path=None):
+    """
+    _move_digest from `temp_path` to `digest_path`
+    :raise KraftError if path strings are invalid
+    :raise KraftError if no file at temp path
+    """
     if None in (temp_path, digest_path):
         raise KraftError("Error paths must not be None")
+    if not os.path.isfile(temp_path):
+        raise KraftError("Unable to access file at path %s" % temp_path)
     shutil.move(temp_path, digest_path)
-
-
-## TODO: Add zstd support
-compression_algorithms = {"tar": "w", "gzip": "w:gz"}
 
 def _make_tar(path: str, 
               files: list[Tuple[str, str]] = None,
@@ -333,7 +320,7 @@ def _make_tar(path: str,
     """
     _make_tar at `path` containing `files`
     :param path to to tar archive
-    :param files is a tupe of (path_to_file, arcname), encapsulating a path to a file
+    :param files is a tuple of (path_to_file, arcname), encapsulating a path to a file
         and the path the file will be stored at in the archive
     :param compression is one of the `compression_algorithms` keys
     :raise KraftError if invalid compression key is chosen
@@ -345,13 +332,9 @@ def _make_tar(path: str,
         for file in files:
             tar.add(file[0], arcname=file[1])
 
-## TODO: figure out how to pass class/static var as default __init__ param
-HASH_BUFF_SIZE = 1024 * 64 #64k
-## TODO: refactor duplicate code
 class Packager:
     def __init__(
         self,
-        #image=ImageWrapper(path=None, architecture=None, platform=None, uk_conf=None),
         image: ImageWrapper = None,
         filesystem: FilesystemWrapper = None,
         artifacts: list[ArtifactWrapper] = None,
@@ -383,36 +366,35 @@ class Packager:
         self._artifacts = artifacts
         self._digest_algo = digest_algorithm
         self._hash_buff_size = hash_buffer_size
+        self._temporary_dirs = temporary_dirs
         self._index = None
         self._manifest = None
         self._image_config = None
         self._filesystem_tar_digest = None
-        self._temporary_dirs = temporary_dirs
 
     def create_oci_filesystem(self) -> DigestWrapper:
         """
         create_oci_filesystem creates OCI Image rootfs, tars it and creates a digest.
-        :return tar_rootfs_path to rootfs
-            digest string of rootfs tar
-            staging_directories temp fs storing artifacts
+        :return DigestWrapper over tar'ed rootfs
         """
-        digester = self._digest_algo.digester()
-        staging_dirs = TemporaryDirs.create(digester.digest().algorithm.value)
         image_name = os.path.basename(self._image.path)
-        image_path = '%s/%s' %(staging_dirs.get_path('image'), image_name) 
+        image_path = '%s/%s' %(self._temporary_dirs.get_path('image'), image_name) 
         shutil.copy2(self._image.path, image_path)
         if self._filesystem:
             fs_name = os.path.basename(self._filesystem.path)
             shutil.copy(self._image.path, '%s/%s'
-                        %(staging_dirs.get_path('filesystem'), fs_name))
+                        %(self._temporary_dirs.get_path('filesystem'), fs_name))
         ## copy artifacts/filesystem
-
+        rootfs_artifacts = self._temporary_dirs.get_path(TemporaryDirs.ARTIFACTS[0]) 
+        if self._artifacts:
+            for artifact in self._artifacts:
+                artifact_name = os.path.basename(artifact.path)
+                artifact_path = "%s/%s" % (rootfs_artifacts, artifact_name)
+                shutil.copy(artifact.path, artifact_path)
         ## tar up rootfs
-        tar_rootfs_path = '%s/%s' % (staging_dirs.get_path('tars'), 'rootfs.tar.gz')
-        tar_tuple = (staging_dirs.get_path('rootfs'), '/rootfs')
+        tar_rootfs_path = '%s/%s' % (self._temporary_dirs.get_path('tars'), 'rootfs.tar.gz')
+        tar_tuple = (self._temporary_dirs.get_path('rootfs'), '/rootfs')
         _make_tar(tar_rootfs_path, [tar_tuple])
-        with tarfile.open(tar_rootfs_path, "w:gz") as tar:
-            tar.add(staging_dirs.get_path('rootfs'), arcname='/rootfs')
         digest = None
         try:
             digest = _create_digest(tar_rootfs_path, self._digest_algo)
@@ -421,7 +403,7 @@ class Packager:
         self._filesystem_tar_digest = digest
         #move to oci dir
         digest_path = "%s/%s" %(self._temporary_dirs.get_path('oci_blobs_sha'), digest.encoded())
-        _move_to_digest_path(tar_rootfs_path, digest_path)
+        _move_digest(tar_rootfs_path, digest_path)
         return DigestWrapper(
             digest = digest,
             path = digest_path,
@@ -459,7 +441,7 @@ class Packager:
         except KraftError as e:
             raise e
         digest_path = "%s/%s" %(self._temporary_dirs.get_path('oci_blobs_sha'), digest.encoded())
-        _move_to_digest_path(scratch_file, digest_path)
+        _move_digest(scratch_file, digest_path)
         return DigestWrapper(
             digest = digest,
             path = digest_path,
@@ -487,7 +469,7 @@ class Packager:
         except KraftError as e:
             raise e
         digest_path = self._temporary_dirs.get_blob_path(digest.encoded())
-        _move_to_digest_path(scratch_file, digest_path)
+        _move_digest(scratch_file, digest_path)
         return DigestWrapper(
             digest = digest,
             path = digest_path,
@@ -508,3 +490,26 @@ class Packager:
         with open(index_path, "w") as f:
             f.write(index.to_json())
         return index_path
+
+    def create_oci_archive(self, out: str = "", path: str = ""):
+        """
+        Create an oci archive from artifacts.
+        :param path to oci directory to be archived
+        :param out where archive should be stored.
+        """
+        _ = self
+        if not path:
+            path = self._temporary_dirs.get_path(TemporaryDirs.OCI_IMAGE[0])
+        files = [ (path, "/") ]
+        try:
+            _make_tar(out, files)
+        except KraftError as e:
+            raise e
+
+    def clean_temporary_dirs(self):
+        """
+        Delete temporary directories
+        """
+        self._temporary_dirs.delete()
+        
+
