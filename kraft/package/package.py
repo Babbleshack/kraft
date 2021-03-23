@@ -65,6 +65,9 @@ HASH_BUFF_SIZE = 1024 * 64 #64k
 #ZSTD="zstd"
 compression_algorithms = {"tar": "w", "gzip": "w:gz"}
 
+#default compression algorithm
+DEFAULT_COMPRESSION = "gzip"
+
 class ArtifactWrapper:
     def __init__(self, path):
         """
@@ -330,7 +333,7 @@ def _make_tar(path: str, files: List[Tuple[str, str]] = None, compression=""):
     :raise KraftError if digest fails to validate
     """
     if not compression in compression_algorithms.keys():
-        raise KraftError("Unsupported compression algorithm")
+        raise KraftError("Unsupported compression algorithm: %s" % compression)
     with tarfile.open(path, compression_algorithms[compression]) as tar:
         for file in files:
             tar.add(file[0], arcname=file[1])
@@ -344,7 +347,7 @@ class Packager:
         digest_algorithm=default_digest_algorithm,
         hash_buffer_size=HASH_BUFF_SIZE,
         temporary_dirs: TemporaryDirs = None,
-        compression_algorithm = None
+        compression_algorithm = DEFAULT_COMPRESSION
     ):
         """
         Package wraps a collection of artifacts and a kernel image into the oci
@@ -459,9 +462,16 @@ class Packager:
         conf_descriptor = config_digest.descriptor
         layer_descriptors = [dw.descriptor for dw in layer_digests]
         layers_d = [dw.to_dict() for dw in layer_descriptors]
+        annotations = {}
+        # TODO: check architecture and manifest are valid
+        if self._image.architecture:
+            annotations["architecture"] = self._image.architecture
+        if self._image.platform:
+            annotations["platform"] = self._image.platform
         manifest = Imagev1.Manifest(
             manifestConfig=conf_descriptor.to_dict(),
             layers=layers_d,
+            annotations=annotations,
             schemaVersion = Versioned(2)
         )
         # write 
