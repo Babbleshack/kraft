@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: BSD-3-Clause
 #
-# Authors: Alexander Jung <alexander.jung@neclab.eu>
+# Authors: Dominic Lindsay <dcrl94@gmail.com>
 #
 # Copyright (c) 2020, NEC Europe Laboratories GmbH., NEC Corporation.
 #                     All rights reserved.
@@ -29,23 +29,3 @@
 # CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
 # ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
 # POSSIBILITY OF SUCH DAMAGE.
-# flake8: noqa
-from __future__ import absolute_import
-from __future__ import unicode_literals
-
-from .build import cmd_build
-from .clean import cmd_clean
-from .configure import cmd_configure
-from .init import cmd_init
-from .lib import cmd_lib_bump
-from .lib import cmd_lib_init
-from .lib import grp_lib
-from .list import cmd_list
-from .list import cmd_list_add
-from .list import cmd_list_pull
-from .list import cmd_list_remove
-from .list import cmd_list_update
-from .menuconfig import cmd_menuconfig
-from .run import cmd_run
-from .up import cmd_up
-from .package import cmd_package
