@@ -73,6 +73,7 @@ def kraft_package(ctx, kernel=None, arch=None, platform=None, config=None,
         manifest_dw = packager.create_oci_manifest(config_digest=conf_dw,
                                                    layer_digests=[fs_dw])
         packager.create_index(manifest_digests=[manifest_dw])
+        packager.create_oci_layout()
         if not os.path.isdir("./package"):
             os.mkdir("./package")
         package_path = "./package/%s" % os.path.basename(image.path)

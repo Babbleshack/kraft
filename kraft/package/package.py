@@ -53,6 +53,7 @@ from opencontainers.digest.exceptions import (
     ErrDigestInvalidLength,
     ErrDigestInvalidFormat
 )
+from opencontainers.image.v1.layout import ImageLayout
 from kraft.error import KraftError
 
 
@@ -141,17 +142,18 @@ class FilesystemWrapper(ArtifactWrapper):
         super().__init__(path)
 
 class TemporaryDirs:
-    ROOT            = ('root', '%s')
-    ROOTFS          = ('rootfs', '%s/rootfs')
-    IMAGE           = ('image', '%s/rootfs/image')
-    FILESYSTEM      = ('filesystem', '%s/rootfs/filesystem')
-    ARTIFACTS       = ('artifacts', '%s/rootfs/artifacts')
-    OCI_IMAGE       = ('oci_image', '%s/oci')
-    OCI_BLOBS       = ('oci_blobs', '%s/oci/blobs')
-    OCI_BLOBS_SHA   = ('oci_blobs_sha', '%s/oci/blobs/%s')
-    OCI_INDEX       = ('oci_index', '%s/oci/index.json')
-    TARS            = ('tars', '%s/tars' )
-    SCRATCH         = ('scratch', '%s/scratch')
+    ROOT                        = ('root', '%s')
+    ROOTFS                      = ('rootfs', '%s/rootfs')
+    IMAGE                       = ('image', '%s/rootfs/image')
+    FILESYSTEM                  = ('filesystem', '%s/rootfs/filesystem')
+    ARTIFACTS                   = ('artifacts', '%s/rootfs/artifacts')
+    OCI_IMAGE                   = ('oci_image', '%s/oci')
+    OCI_BLOBS                   = ('oci_blobs', '%s/oci/blobs')
+    OCI_BLOBS_SHA               = ('oci_blobs_sha', '%s/oci/blobs/%s')
+    OCI_INDEX                   = ('oci_index', '%s/oci/index.json')
+    OCI_IMAGE_LAYOUT_VERSION    = ('oci_image_layout_version', '%s/oci/oci-layout')  
+    TARS                        = ('tars', '%s/tars' )
+    SCRATCH                     = ('scratch', '%s/scratch')
 
     def __init__(self, dirs):
         """
@@ -173,24 +175,25 @@ class TemporaryDirs:
         """
         temp_dir = tempfile.mkdtemp()
         temp = {
-            cls.ROOT[0]:            cls.ROOT[1] % (temp_dir),
-            cls.ROOTFS[0]:          cls.ROOTFS[1] % (temp_dir),
-            cls.IMAGE[0]:           cls.IMAGE[1] % (temp_dir),
-            cls.FILESYSTEM[0]:      cls.FILESYSTEM[1] % (temp_dir),
-            cls.ARTIFACTS[0]:       cls.ARTIFACTS[1] % (temp_dir),
-            cls.OCI_IMAGE[0]:       cls.OCI_IMAGE[1] % (temp_dir),
-            cls.OCI_BLOBS[0]:       cls.OCI_BLOBS[1] % (temp_dir),
-            cls.OCI_BLOBS_SHA[0]:   cls.OCI_BLOBS_SHA[1] %(temp_dir, sha),
-            cls.OCI_INDEX[0]:       cls.OCI_INDEX[1] % (temp_dir),
-            cls.TARS[0]:            cls.TARS[1] % (temp_dir), # temp location for tars
-            cls.SCRATCH[0]:         cls.SCRATCH[1] % (temp_dir)
+            cls.ROOT[0]:                        cls.ROOT[1] % (temp_dir),
+            cls.ROOTFS[0]:                      cls.ROOTFS[1] % (temp_dir),
+            cls.IMAGE[0]:                       cls.IMAGE[1] % (temp_dir),
+            cls.FILESYSTEM[0]:                  cls.FILESYSTEM[1] % (temp_dir),
+            cls.ARTIFACTS[0]:                   cls.ARTIFACTS[1] % (temp_dir),
+            cls.OCI_IMAGE[0]:                   cls.OCI_IMAGE[1] % (temp_dir),
+            cls.OCI_BLOBS[0]:                   cls.OCI_BLOBS[1] % (temp_dir),
+            cls.OCI_BLOBS_SHA[0]:               cls.OCI_BLOBS_SHA[1] %(temp_dir, sha),
+            cls.OCI_INDEX[0]:                   cls.OCI_INDEX[1] % (temp_dir),
+            cls.OCI_IMAGE_LAYOUT_VERSION[0]:    cls.OCI_IMAGE_LAYOUT_VERSION[1] % (temp_dir),
+            cls.TARS[0]:                        cls.TARS[1] % (temp_dir), # temp location for tars
+            cls.SCRATCH[0]:                     cls.SCRATCH[1] % (temp_dir)
             #'artifacts':   '%s/rootfs/artifacts' % (temp_dir),
         }
-        skip = [cls.ROOT[0], cls.OCI_INDEX[0]]
+        skip = [cls.ROOT[0], cls.OCI_INDEX[0], cls.OCI_IMAGE_LAYOUT_VERSION[0]]
         ## dont need to check if dir already exists -- tmp file
         for key, dir in temp.items():
             #skip some dirs
-            if key in  skip:
+            if key in skip:
                 continue
             os.mkdir(dir)
         return TemporaryDirs(temp)
@@ -208,7 +211,7 @@ class TemporaryDirs:
         :raise ValueError if invalid key
         """
         if key not in self._dirs:
-            raise ValueError("Invalid directory key: %s" % key)
+            raise ValueError("Invalid directory key: %s" % (key))
         return self._dirs[key]
 
     def get_config_path(self, config_hash):
@@ -379,6 +382,7 @@ class Packager:
         self._manifest = None
         self._image_config = None
         self._filesystem_tar_digest = None
+        self._image_layout = None
 
     def create_oci_filesystem(self) -> DigestWrapper:
         """
@@ -512,7 +516,6 @@ class Packager:
         :param path to oci directory to be archived
         :param out where archive should be stored.
         """
-        _ = self
         if not path:
             path = self._temporary_dirs.get_path(TemporaryDirs.OCI_IMAGE[0])
         files = [ (path, "/") ]
@@ -520,6 +523,18 @@ class Packager:
             _make_tar(out, files, self._compression_algo)
         except KraftError as e:
             raise e
+
+    def create_oci_layout(self):
+        """
+        Create OCI Image Layout file.
+        """
+        _ = self
+        self._image_layout = ImageLayout()
+        scratch_file = "%s" %(self._temporary_dirs.get_path(
+            TemporaryDirs.OCI_IMAGE_LAYOUT_VERSION[0]
+        ))
+        with open(scratch_file, "w") as f:
+            f.write(self._image_layout.to_json())
 
     def clean_temporary_dirs(self):
         """
