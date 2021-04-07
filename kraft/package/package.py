@@ -44,6 +44,7 @@ from opencontainers.image.v1 import (
     Descriptor,
 )
 import opencontainers.image.v1.mediatype as MediaType
+import opencontainers.image.v1.annotations as AnnotationRefName
 from opencontainers.image.v1.config import Image
 from opencontainers.digest  import Canonical as default_digest_algorithm
 from opencontainers.image.specs import Versioned 
@@ -67,7 +68,7 @@ HASH_BUFF_SIZE = 1024 * 64 #64k
 compression_algorithms = {"tar": "w", "gzip": "w:gz"}
 
 #default compression algorithm
-DEFAULT_COMPRESSION = "gzip"
+DEFAULT_COMPRESSION = "tar"
 
 class ArtifactWrapper:
     def __init__(self, path):
@@ -219,7 +220,7 @@ class TemporaryDirs:
         return "%s/%s" %(path, config_hash)
 
     def get_blob_path(self, digest_hash):
-        return "%s/%ss" % (self._dirs['oci_blobs_sha'], digest_hash)
+        return "%s/%s" % (self._dirs['oci_blobs_sha'], digest_hash)
 
 def _validate(manifest):
     """
@@ -236,17 +237,19 @@ def _validate(manifest):
         raise KraftError("Malformed rootfs digest: %s" % e)
 
 class DigestWrapper:
-    def __init__(self, digest, path, media_type):
+    def __init__(self, digest, path, media_type, tag=None):
         """
         DigestWrapper wraps a digest and a path to the file referenced by the
         digest.
         :param digest to wrap.
         :param path to file digest references.
         :param media_type is oci media type
+        :param tag associated with digest
         """
         self._digest = digest
         self._path = path
         self._media_type = media_type
+        self._tag = tag
 
     @property
     def digest(self):
@@ -280,14 +283,26 @@ class DigestWrapper:
         return os.path.getsize(self._path)
 
     @property
+    def tag(self):
+        """
+        tag associated with the digest
+        """
+        return self._tag
+
+    @property
     def descriptor(self):
         """
         return a descriptor of the wrapped digest
         """
-        return Descriptor(
+        d = Descriptor(
             digest = self.digest,
             mediatype = self.media_type,
             size = self.size)
+        if self._tag:
+            d.add("Annotations", {"org.opencontainers.image.ref.name": self._tag})
+        return d
+
+
 
 def _create_digest(
         path="",
@@ -462,7 +477,8 @@ class Packager:
 
     def create_oci_manifest(self,
                             config_digest: DigestWrapper,
-                            layer_digests: List[DigestWrapper]) -> DigestWrapper:
+                            layer_digests: List[DigestWrapper],
+                            tag=None) -> DigestWrapper:
         conf_descriptor = config_digest.descriptor
         layer_descriptors = [dw.descriptor for dw in layer_digests]
         layers_d = [dw.to_dict() for dw in layer_descriptors]
@@ -472,6 +488,7 @@ class Packager:
             annotations["architecture"] = self._image.architecture
         if self._image.platform:
             annotations["platform"] = self._image.platform
+        annotations["org.opencontainers.image.ref.name"] = "latest"
         manifest = Imagev1.Manifest(
             manifestConfig=conf_descriptor.to_dict(),
             layers=layers_d,
@@ -492,7 +509,8 @@ class Packager:
         return DigestWrapper(
             digest = digest,
             path = digest_path,
-            media_type = MediaType.MediaTypeImageManifest
+            media_type = MediaType.MediaTypeImageManifest,
+            tag=tag
         )
 
     def create_index(self, manifest_digests: List[DigestWrapper]) -> str:

@@ -44,7 +44,8 @@ from kraft.error import KraftError
 from kraft.logger import logger
 
 def kraft_package(ctx, kernel=None, arch=None, platform=None, config=None,
-                  filesystem_path=None, artifact_paths=[], hash_algo=None, compression=None):
+                  filesystem_path=None, artifact_paths=[], hash_algo=None,
+                  compression=None, tag=None):
     if hash_algo not in algorithms.keys():
         raise KraftError("Error invalid hash algorithm, valid algorithms: %s" %
                          ", ".join(algorithms.keys()))
@@ -71,7 +72,8 @@ def kraft_package(ctx, kernel=None, arch=None, platform=None, config=None,
         fs_dw = packager.create_oci_filesystem()
         conf_dw = packager.create_oci_config(fs_dw)
         manifest_dw = packager.create_oci_manifest(config_digest=conf_dw,
-                                                   layer_digests=[fs_dw])
+                                                   layer_digests=[fs_dw],
+                                                   tag=tag)
         packager.create_index(manifest_digests=[manifest_dw])
         packager.create_oci_layout()
         if not os.path.isdir("./package"):
@@ -91,8 +93,9 @@ def kraft_package(ctx, kernel=None, arch=None, platform=None, config=None,
               type=click.Path(exists=True, readable=True))
 @click.option('--hash-type', '-h', default="sha256",
               type=click.Choice(algorithms.keys(), case_sensitive=False))
-@click.option('--compression-algorithm', '-h', 'compression', default="gzip",
+@click.option('--compression-algorithm', '-c', 'compression', default="tar",
               type=click.Choice(compression_algorithms.keys(), case_sensitive=False))
+@click.option('--tag', '-t', default="latest")
 @click.argument('image',
                 type=click.Path(exists=True),
                 required=True)
@@ -104,7 +107,7 @@ def kraft_package(ctx, kernel=None, arch=None, platform=None, config=None,
 @click.pass_context
 def cmd_package(ctx, image=None, architecture=None, platform=None, config=None,
                 filesystem_path=None, artifact_paths=[], hash_type=None,
-                compression=None):
+                compression=None, tag=None):
     """
     Packages a Unikraft application as an OCI Image
     """
@@ -120,7 +123,8 @@ def cmd_package(ctx, image=None, architecture=None, platform=None, config=None,
             filesystem_path=filesystem_path,
             artifact_paths=artifact_paths,
             hash_algo=hash_type,
-            compression=compression
+            compression=compression,
+            tag=tag
         )
     except Exception as e:
         logger.critical(str(e))
