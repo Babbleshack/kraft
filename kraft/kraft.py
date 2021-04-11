@@ -44,6 +44,7 @@ from kraft.cmd import cmd_run
 from kraft.cmd import cmd_up
 from kraft.cmd import grp_lib
 from kraft.cmd import cmd_package
+from kraft.cmd import cmd_push
 from kraft.context import KraftContext
 from kraft.logger import logger
 from kraft.util.cli import CONTEXT_SETTINGS
@@ -111,3 +112,4 @@ kraft.add_command(cmd_run)
 kraft.add_command(cmd_clean)
 kraft.add_command(grp_lib)
 kraft.add_command(cmd_package)
+kraft.add_command(cmd_push)
