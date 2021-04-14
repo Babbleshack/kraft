@@ -10,9 +10,7 @@
 # are met:
 #
 # 1. Redistributions of source code must retain the above copyright
-#    notice, this list of conditions and the following disclaimer.
-# 2. Redistributions in binary form must reproduce the above copyright
-#    notice, this list of conditions and the following disclaimer in the
+#    notice, this list of conditions and the following disclaimer.  2. Redistributions in binary form must reproduce the above copyright notice, this list of conditions and the following disclaimer in the
 #    documentation and/or other materials provided with the distribution.
 # 3. Neither the name of the copyright holder nor the names of its
 #    contributors may be used to endorse or promote products derived from
@@ -33,6 +31,7 @@ import os
 import shutil
 import tempfile 
 import tarfile
+import json
 from typing import (
     Tuple,
     List
@@ -69,6 +68,85 @@ compression_algorithms = {"tar": "w", "gzip": "w:gz"}
 
 #default compression algorithm
 DEFAULT_COMPRESSION = "tar"
+
+
+## TODO: Move this to Runtime-Spec package
+class VMImage:
+    """
+    VMImage adheers to oci runtime-spec kernel object
+    VMImage refers to a filesystem object e.g. initrd
+    """
+    def __init__(self, path, format):
+        self._path = path 
+        self._format = format
+
+    @property
+    def path(self):
+        return self._path
+
+    @property
+    def format(self):
+        return self._format
+
+    def to_dict(self):
+        return {
+            "path": self._path,
+            "format": self._format
+        }
+
+class Kernel:
+    """
+    Kernel adheers to oci runtime-spec kernel object
+    """
+    def __init__(self, kernel_path: str, parameters: List[str] = None):
+        self._kernel_path = kernel_path
+        self._parameters = parameters
+
+    @property
+    def kernel(self):
+        return self._kernel_path
+
+    @property
+    def parameters(self):
+        return self._parameters
+
+    def to_dict(self):
+        x = {
+            "path": self.kernel,
+        }
+        if self._parameters:
+            x["parameters"] = self.parameters
+        return x 
+
+class VirtualMachine:
+    """
+    VirtualMachine adheres to oci runtime-spec vm object
+    """
+    def __init__(self, kernel: Kernel, vmImage: VMImage = None):
+        self._kernel = kernel
+        self._vmImage = vmImage
+
+    @property
+    def kernel(self):
+        return self._kernel
+
+    @property
+    def VMImage(self):
+        return self._vmImage
+
+    def to_dict(self):
+        x = {
+            "kernel": self.kernel.to_dict()
+        }
+        if self.VMImage:
+            x["image"] = self.VMImage.to_dict()
+        return x
+
+    def to_json(self):
+        d = self.to_dict()
+        return json.dumps(d)
+
+### END 
 
 class ArtifactWrapper:
     def __init__(self, path):
@@ -148,6 +226,8 @@ class TemporaryDirs:
     IMAGE                       = ('image', '%s/rootfs/image')
     FILESYSTEM                  = ('filesystem', '%s/rootfs/filesystem')
     ARTIFACTS                   = ('artifacts', '%s/rootfs/artifacts')
+    CONFIG                      = ('config', '%s/rootfs/vm')
+    VM                          = ('vm', '%s/rootfs/vm/vm.json')
     OCI_IMAGE                   = ('oci_image', '%s/oci')
     OCI_BLOBS                   = ('oci_blobs', '%s/oci/blobs')
     OCI_BLOBS_SHA               = ('oci_blobs_sha', '%s/oci/blobs/%s')
@@ -181,6 +261,8 @@ class TemporaryDirs:
             cls.IMAGE[0]:                       cls.IMAGE[1] % (temp_dir),
             cls.FILESYSTEM[0]:                  cls.FILESYSTEM[1] % (temp_dir),
             cls.ARTIFACTS[0]:                   cls.ARTIFACTS[1] % (temp_dir),
+            cls.CONFIG[0]:                      cls.CONFIG[1] % (temp_dir),
+            cls.VM[0]:                          cls.VM[1] % (temp_dir),
             cls.OCI_IMAGE[0]:                   cls.OCI_IMAGE[1] % (temp_dir),
             cls.OCI_BLOBS[0]:                   cls.OCI_BLOBS[1] % (temp_dir),
             cls.OCI_BLOBS_SHA[0]:               cls.OCI_BLOBS_SHA[1] %(temp_dir, sha),
@@ -190,10 +272,10 @@ class TemporaryDirs:
             cls.SCRATCH[0]:                     cls.SCRATCH[1] % (temp_dir)
             #'artifacts':   '%s/rootfs/artifacts' % (temp_dir),
         }
-        skip = [cls.ROOT[0], cls.OCI_INDEX[0], cls.OCI_IMAGE_LAYOUT_VERSION[0]]
+        skip = [cls.ROOT[0], cls.OCI_INDEX[0], cls.OCI_IMAGE_LAYOUT_VERSION[0], cls.VM[0]]
         ## dont need to check if dir already exists -- tmp file
         for key, dir in temp.items():
-            #skip some dirs
+            #skip some keys referencing files
             if key in skip:
                 continue
             os.mkdir(dir)
@@ -418,6 +500,8 @@ class Packager:
                 artifact_name = os.path.basename(artifact.path)
                 artifact_path = "%s/%s" % (rootfs_artifacts, artifact_name)
                 shutil.copy(artifact.path, artifact_path)
+        ## Create vm object 
+        self._create_runtime_vm_object()
         ## tar up rootfs
         tar_rootfs_path = '%s/%s' % (self._temporary_dirs.get_path('tars'), 'rootfs.tar.gz')
         tar_tuple = (self._temporary_dirs.get_path('rootfs'), '/rootfs')
@@ -479,6 +563,8 @@ class Packager:
                             config_digest: DigestWrapper,
                             layer_digests: List[DigestWrapper],
                             tag=None) -> DigestWrapper:
+        if not kernel_path:
+            raise KraftError("Error kernel_path must be set")
         conf_descriptor = config_digest.descriptor
         layer_descriptors = [dw.descriptor for dw in layer_digests]
         layers_d = [dw.to_dict() for dw in layer_descriptors]
@@ -528,6 +614,32 @@ class Packager:
             f.write(index.to_json())
         return index_path
 
+    def create_oci_layout(self):
+        """
+        Create OCI Image Layout file.
+        """
+        _ = self
+        self._image_layout = ImageLayout()
+        scratch_file = "%s" %(self._temporary_dirs.get_path(
+            TemporaryDirs.OCI_IMAGE_LAYOUT_VERSION[0]
+        ))
+        with open(scratch_file, "w") as f:
+            f.write(self._image_layout.to_json())
+
+    def _create_runtime_vm_object(self):
+        """
+        Add runtime config to rootfs/vm directory
+        """
+        ## Find path to image inside of oci archive (e.g. ./rootfs/image/<kernel>)
+        image_name = os.path.basename(self._image.path)
+        ## TODO: get image path variable rather than constant string
+        image_path = '%s/%s' %("image", image_name)
+        k = Kernel(image_path)
+        vm = VirtualMachine(k)
+        scratch_file = "%s" % self._temporary_dirs.get_path(TemporaryDirs.VM[0])
+        with open(scratch_file, "w") as f:
+            f.write(vm.to_json())
+        
     def create_oci_archive(self, out: str = "", path: str = ""):
         """
         Create an oci archive from artifacts.
@@ -541,18 +653,6 @@ class Packager:
             _make_tar(out, files, self._compression_algo)
         except KraftError as e:
             raise e
-
-    def create_oci_layout(self):
-        """
-        Create OCI Image Layout file.
-        """
-        _ = self
-        self._image_layout = ImageLayout()
-        scratch_file = "%s" %(self._temporary_dirs.get_path(
-            TemporaryDirs.OCI_IMAGE_LAYOUT_VERSION[0]
-        ))
-        with open(scratch_file, "w") as f:
-            f.write(self._image_layout.to_json())
 
     def clean_temporary_dirs(self):
         """
