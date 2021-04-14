@@ -30,15 +30,19 @@
 # ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
 # POSSIBILITY OF SUCH DAMAGE.
 
+from opencontainers.distribution.reggie import *
+from kraft.logger import logger
 import click
 import sys
 import os
 import subprocess
-
-from kraft.logger import logger
+import tarfile
+import json
 
 default_path = './package/'
-default_server = '10.16.4.30/library/'
+default_url = 'http://10.16.4.30:80'
+index_path = 'index.json'
+default_project = 'library'
 
 # TODO: add version tag for repositories
 @click.command('push', short_help='Push an OCI-Image on Harbor')
@@ -46,7 +50,7 @@ default_server = '10.16.4.30/library/'
 @click.option(
     '--image', '-i', 'image',
     help='Specify the OCI-Image path. Default: ./package/*',
-    metavar="IMAGE"
+    metavar="IMAGE_PATH"
 )
 
 @click.option(
@@ -57,8 +61,8 @@ default_server = '10.16.4.30/library/'
 
 @click.option(
     '--server', '-s', 'server',
-    help='Specify the Harbor instance and project',
-    metavar="IP/PROJECT/"
+    help='Specify the Harbor instance url',
+    metavar="URL"
 )
 
 @click.pass_context
@@ -68,9 +72,9 @@ def cmd_push(ctx, image=None, name=None, server=None):
     """
 
     if image is None:
-        output = subprocess.check_output(['ls', default_path]).decode('utf-8')
+        output = subprocess.check_output(['ls', default_path])
         
-        files = output.split()
+        files = output.decode('utf-8').split()
         if len(files) != 1:
             logger.critical('Operation failed, multiple files found.')
             if ctx.obj.verbose:
@@ -79,10 +83,13 @@ def cmd_push(ctx, image=None, name=None, server=None):
             sys.exit(1)
         else:
             image = default_path + files[0]
-            if name is None:
-                name = files[0]
+
+    if name is None:
+        tokens = image.split('/')
+        name = tokens[len(tokens)-1]
+
     if server is None:
-        server = default_server
+        server = default_url
 
     try:
         kraft_push(
@@ -102,30 +109,69 @@ def cmd_push(ctx, image=None, name=None, server=None):
 @click.pass_context
 def kraft_push(ctx, image=None, name=None, server=None):
 
-    cmd = 'docker -v > /dev/null 2>&1'
-    rc = os.system(cmd)
-    if rc != 0:
-        raise Exception('Missing docker client.')
-
     cmd = 'ls ' + image + ' > /dev/null 2>&1'
     rc = os.system(cmd)
     if rc != 0:
         raise Exception('Image not found.')
 
-    cmd = 'file ' + image + ' | grep "tar archive" > /dev/null 2>&1'
-    rc = os.system(cmd)
-    if rc != 0:
+    rc = tarfile.is_tarfile(image)
+    if not rc:
         raise Exception('Bad OCI-Image format.')
 
-    cmd = 'docker import ' + image + ' ' + name
-    os.system(cmd)
+    client = NewClient(server,
+                       WithUsernamePassword('admin', 'Harbor12345'),
+                       WithDefaultName(name),
+                       WithDebug(True))
 
-    repo_name = server + name
-    cmd = 'docker tag ' + name + ' ' + repo_name + '> /dev/null 2>&1'
-    os.system(cmd)
+    # req = client.NewRequest("GET", "/api/v2.0/ping")
+    # print(req)
+    # response = client.Do(req)
+    # print(response._content)
 
-    cmd = 'docker push ' + repo_name
-    os.system(cmd)
+    t = tarfile.open(image)
 
-    cmd = 'docker rmi -f ' + name + ' ' + repo_name + '> /dev/null 2>&1'
-    os.system(cmd)
+    index_fd = t.extractfile(index_path)
+    index_json = json.load(index_fd)
+    
+    manifest_digest = index_json['manifests'][0]['digest']
+    tokens = manifest_digest.split(':')
+    manifest_path = 'blobs/' + tokens[0] + '/' + tokens[1]
+    # print(manifest_path)
+
+    manifest_fd = t.extractfile(manifest_path)
+    manifest_json = json.load(manifest_fd)
+
+    config = manifest_json['config']
+    layers = manifest_json['layers']
+    blobs = [config] + layers
+
+    # push the blobs specified
+    for blob in blobs:
+        blob_digest = blob['digest']
+        tokens = blob_digest.split(':')
+        blob_path = 'blobs/' + tokens[0] + '/' + tokens[1]
+        # print(blob_path)
+        # prepare the request to upload
+        req = client.NewRequest("POST", "/v2/" + default_project + "/<name>/blobs/uploads/")
+        # print(req)
+        response = client.Do(req)
+        # print(response.headers['Location'])
+
+        with t.extractfile(blob_path) as blob_fd:
+            data = blob_fd.read()
+
+        req = (client.NewRequest("PUT", response.GetRelativeLocation()).
+                    SetHeader("Content-Type", blob['mediaType']). # "application/octet-stream").
+                    SetHeader("Content-Length", str(len(data))).
+                    SetQueryParam("digest", blob_digest).
+                    SetBody(data))
+        # print(req)
+        response = client.Do(req)
+        # print(response.headers['Location'])
+
+    # upload the manifest
+    req = (client.NewRequest("PUT", "/v2/" + default_project + "/<name>/manifests/<reference>",
+                WithReference("latest")).
+                SetHeader("Content-Type", index_json['manifests'][0]['mediaType']). # "application/vnd.oci.image.manifest.v1+json").
+                SetBody(manifest_json))
+    response = client.Do(req)
