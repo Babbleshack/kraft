@@ -74,6 +74,8 @@ def kraft_package(ctx, kernel=None, arch=None, platform=None, config=None,
         manifest_dw = packager.create_oci_manifest(config_digest=conf_dw,
                                                    layer_digests=[fs_dw],
                                                    tag=tag)
+        packager.create_runtime_vm_object()
+        packager.create_architecture_config()
         packager.create_index(manifest_digests=[manifest_dw])
         packager.create_oci_layout()
         if not os.path.isdir("./package"):

@@ -226,8 +226,9 @@ class TemporaryDirs:
     IMAGE                       = ('image', '%s/rootfs/image')
     FILESYSTEM                  = ('filesystem', '%s/rootfs/filesystem')
     ARTIFACTS                   = ('artifacts', '%s/rootfs/artifacts')
-    CONFIG                      = ('config', '%s/rootfs/vm')
-    VM                          = ('vm', '%s/rootfs/vm/vm.json')
+    CONFIG                      = ('config', '%s/rootfs/config')
+    VM                          = ('vm', '%s/rootfs/config/vm.json')
+    VM_CONFIG                   = ('vm_config', '%s/rootfs/config/vm_config.json')
     OCI_IMAGE                   = ('oci_image', '%s/oci')
     OCI_BLOBS                   = ('oci_blobs', '%s/oci/blobs')
     OCI_BLOBS_SHA               = ('oci_blobs_sha', '%s/oci/blobs/%s')
@@ -238,7 +239,8 @@ class TemporaryDirs:
 
     def __init__(self, dirs):
         """
-        TemporaryDirs is a wrapper class managing temporary dirs used for building images.
+        TemporaryDirs is a wrapper class managing temporary dirs used for
+        building images.
         """
         if not dirs:
             raise ValueError("Init with create_staging_dirs")
@@ -263,6 +265,7 @@ class TemporaryDirs:
             cls.ARTIFACTS[0]:                   cls.ARTIFACTS[1] % (temp_dir),
             cls.CONFIG[0]:                      cls.CONFIG[1] % (temp_dir),
             cls.VM[0]:                          cls.VM[1] % (temp_dir),
+            cls.VM_CONFIG[0]:                   cls.VM_CONFIG[1] % (temp_dir),
             cls.OCI_IMAGE[0]:                   cls.OCI_IMAGE[1] % (temp_dir),
             cls.OCI_BLOBS[0]:                   cls.OCI_BLOBS[1] % (temp_dir),
             cls.OCI_BLOBS_SHA[0]:               cls.OCI_BLOBS_SHA[1] %(temp_dir, sha),
@@ -272,7 +275,8 @@ class TemporaryDirs:
             cls.SCRATCH[0]:                     cls.SCRATCH[1] % (temp_dir)
             #'artifacts':   '%s/rootfs/artifacts' % (temp_dir),
         }
-        skip = [cls.ROOT[0], cls.OCI_INDEX[0], cls.OCI_IMAGE_LAYOUT_VERSION[0], cls.VM[0]]
+        skip = [cls.ROOT[0], cls.OCI_INDEX[0], cls.OCI_IMAGE_LAYOUT_VERSION[0],
+                cls.VM[0], cls.VM_CONFIG[0]]
         ## dont need to check if dir already exists -- tmp file
         for key, dir in temp.items():
             #skip some keys referencing files
@@ -500,9 +504,9 @@ class Packager:
                 artifact_name = os.path.basename(artifact.path)
                 artifact_path = "%s/%s" % (rootfs_artifacts, artifact_name)
                 shutil.copy(artifact.path, artifact_path)
-        ## Create vm object 
-        self._create_runtime_vm_object()
-        ## tar up rootfs
+        self.create_runtime_vm_object()
+        self.create_architecture_config()
+        ## Create rootfs tar
         tar_rootfs_path = '%s/%s' % (self._temporary_dirs.get_path('tars'), 'rootfs.tar.gz')
         tar_tuple = (self._temporary_dirs.get_path('rootfs'), '/rootfs')
         _make_tar(tar_rootfs_path, [tar_tuple], self._compression_algo)
@@ -563,8 +567,6 @@ class Packager:
                             config_digest: DigestWrapper,
                             layer_digests: List[DigestWrapper],
                             tag=None) -> DigestWrapper:
-        if not kernel_path:
-            raise KraftError("Error kernel_path must be set")
         conf_descriptor = config_digest.descriptor
         layer_descriptors = [dw.descriptor for dw in layer_digests]
         layers_d = [dw.to_dict() for dw in layer_descriptors]
@@ -581,6 +583,7 @@ class Packager:
             annotations=annotations,
             schemaVersion = Versioned(2)
         )
+        self._manifest = manifest
         # write 
         scratch_file = "%s/manifest.json" %(self._temporary_dirs.get_path('scratch'))
         with open(scratch_file, "w") as f:
@@ -626,7 +629,7 @@ class Packager:
         with open(scratch_file, "w") as f:
             f.write(self._image_layout.to_json())
 
-    def _create_runtime_vm_object(self):
+    def create_runtime_vm_object(self):
         """
         Add runtime config to rootfs/vm directory
         """
@@ -639,6 +642,40 @@ class Packager:
         scratch_file = "%s" % self._temporary_dirs.get_path(TemporaryDirs.VM[0])
         with open(scratch_file, "w") as f:
             f.write(vm.to_json())
+
+    def create_architecture_config(self):
+        """
+        Add a config describing architecture and platform to rootfs When
+        containerd shim starts a container specific 'skeleton' runtime-spec
+        config file is created in the bundle directory. we need a reference to
+        the architecture and platform the image was built for.  The containerd
+        runtime-spec does not specify these, so we embed the some annotations
+        in the rootfs/config dir so that we can generate a new conig json in
+        the shim.
+        """
+        d = {
+            "architecture": self._image.architecture,
+            "platform": self._image.platform,
+        }
+        scratch_file = "%s" % self._temporary_dirs.get_path(TemporaryDirs.VM_CONFIG[0])
+        with open(scratch_file, "w") as f:
+            f.write(json.dumps(d))
+
+
+   # def create_runtime_manifest(self):
+   #     """
+   #     Add manifest to rootfs -- When containerd shim start we need a reference to
+   #     the architecture and platform a kernel image was built for. The runtime-spec
+   #     does not specify these, so we embed the image-spec manifest under 
+   #     rootfs/config/manifest.json.
+   #     """
+   #     if not self._manifest:
+   #         raise KraftError("Error manifest is not set, invoke create_oci_manifest first()")
+   #     manifest_json = self._manifest.to_json()
+   #     scratch_file = "%s" % self._temporary_dirs.get_path(TemporaryDirs.MANIFEST[0])
+   #     print("PATH: %s, MANIFEST: %s" %(scratch_file, manifest_json))
+   #     with open(scratch_file, "w") as f:
+   #         f.write(manifest_json)
         
     def create_oci_archive(self, out: str = "", path: str = ""):
         """
