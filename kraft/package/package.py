@@ -307,6 +307,7 @@ class TemporaryDirs:
 
     def get_blob_path(self, digest_hash):
         return "%s/%s" % (self._dirs['oci_blobs_sha'], digest_hash)
+    
 
 def _validate(manifest):
     """
@@ -504,11 +505,12 @@ class Packager:
                 artifact_name = os.path.basename(artifact.path)
                 artifact_path = "%s/%s" % (rootfs_artifacts, artifact_name)
                 shutil.copy(artifact.path, artifact_path)
+        ## Add runtime vm spec and annotations describing arch/plat
         self.create_runtime_vm_object()
         self.create_architecture_config()
         ## Create rootfs tar
         tar_rootfs_path = '%s/%s' % (self._temporary_dirs.get_path('tars'), 'rootfs.tar.gz')
-        tar_tuple = (self._temporary_dirs.get_path('rootfs'), '/rootfs')
+        tar_tuple = (self._temporary_dirs.get_path('rootfs'), '/')
         _make_tar(tar_rootfs_path, [tar_tuple], self._compression_algo)
         digest = None
         try:
