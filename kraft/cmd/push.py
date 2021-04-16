@@ -35,7 +35,6 @@ from kraft.logger import logger
 import click
 import sys
 import os
-import subprocess
 import tarfile
 import json
 
@@ -64,25 +63,29 @@ default_passwd = 'Harbor12345'
 @click.option(
     '--server', '-s', 'server',
     help='Specify a Harbor instance url',
-    metavar="http://URL:PORT"
+    metavar="http://URL:PORT",
+    default=default_url
 )
 
 @click.option(
     '--project', '-p', 'project',
     help='Specify the project',
-    metavar="PROJECT"
+    metavar="PROJECT",
+    default=default_project
 )
 
 @click.option(
     '--user', '-u', 'user',
     help='Specify the user',
-    metavar="USER"
+    metavar="USER",
+    default=default_user
 )
 
 @click.option(
     '--password', '-pw', 'passwd',
     help='Specify the password',
-    metavar="PASSWORD"
+    metavar="PASSWORD",
+    default=default_passwd
 )
 
 @click.pass_context
@@ -92,11 +95,9 @@ def cmd_push(ctx, image=None, name=None, server=None, project=None, user=None, p
     """
 
     if image is None:
-        output = subprocess.check_output(['ls', default_path])
-        
-        files = output.decode('utf-8').split()
+        files = os.listdir(default_path)
         if len(files) != 1:
-            logger.critical('Operation failed, multiple files found.')
+            logger.critical('Operation failed, none or multiple files found.')
             if ctx.obj.verbose:
                 import traceback
                 logger.critical(traceback.format_exc())
@@ -107,18 +108,6 @@ def cmd_push(ctx, image=None, name=None, server=None, project=None, user=None, p
     if name is None:
         tokens = image.split('/')
         name = tokens[len(tokens)-1]
-
-    if server is None:
-        server = default_url
-
-    if project is None:
-        project = default_project
-
-    if user is None:
-        user = default_user
-
-    if passwd is None:
-        passwd = default_passwd
 
     try:
         kraft_push(
@@ -140,10 +129,8 @@ def cmd_push(ctx, image=None, name=None, server=None, project=None, user=None, p
 
 @click.pass_context
 def kraft_push(ctx, image=None, name=None, server=None, project=None, user=None, passwd=None):
-
-    cmd = 'ls ' + image + ' > /dev/null 2>&1'
-    rc = os.system(cmd)
-    if rc != 0:
+  
+    if not os.path.isfile(image):
         raise Exception('Image not found.')
 
     rc = tarfile.is_tarfile(image)
