@@ -40,9 +40,11 @@ import tarfile
 import json
 
 default_path = './package/'
-default_url = 'http://10.16.4.30:80'
 index_path = 'index.json'
+default_url = 'http://10.16.4.30:80'
 default_project = 'library'
+default_user = 'admin'
+default_passwd = 'Harbor12345'
 
 # TODO: add version tag for repositories
 @click.command('push', short_help='Push an OCI-Image on Harbor')
@@ -61,12 +63,30 @@ default_project = 'library'
 
 @click.option(
     '--server', '-s', 'server',
-    help='Specify the Harbor instance url',
-    metavar="URL"
+    help='Specify a Harbor instance url',
+    metavar="http://URL:PORT"
+)
+
+@click.option(
+    '--project', '-p', 'project',
+    help='Specify the project',
+    metavar="PROJECT"
+)
+
+@click.option(
+    '--user', '-u', 'user',
+    help='Specify the user',
+    metavar="USER"
+)
+
+@click.option(
+    '--password', '-pw', 'passwd',
+    help='Specify the password',
+    metavar="PASSWORD"
 )
 
 @click.pass_context
-def cmd_push(ctx, image=None, name=None, server=None):
+def cmd_push(ctx, image=None, name=None, server=None, project=None, user=None, passwd=None):
     """
     Push an OCI-Image on Harbor
     """
@@ -91,11 +111,23 @@ def cmd_push(ctx, image=None, name=None, server=None):
     if server is None:
         server = default_url
 
+    if project is None:
+        project = default_project
+
+    if user is None:
+        user = default_user
+
+    if passwd is None:
+        passwd = default_passwd
+
     try:
         kraft_push(
             image=image,
             name=name,
-            server=server
+            server=server,
+            project=project,
+            user=user,
+            passwd=passwd
         )
     except Exception as e:
         logger.critical(str(e))
@@ -107,7 +139,7 @@ def cmd_push(ctx, image=None, name=None, server=None):
         sys.exit(1)
 
 @click.pass_context
-def kraft_push(ctx, image=None, name=None, server=None):
+def kraft_push(ctx, image=None, name=None, server=None, project=None, user=None, passwd=None):
 
     cmd = 'ls ' + image + ' > /dev/null 2>&1'
     rc = os.system(cmd)
@@ -118,15 +150,15 @@ def kraft_push(ctx, image=None, name=None, server=None):
     if not rc:
         raise Exception('Bad OCI-Image format.')
 
-    client = NewClient(server,
-                       WithUsernamePassword('admin', 'Harbor12345'),
-                       WithDefaultName(name),
-                       WithDebug(True))
-
-    # req = client.NewRequest("GET", "/api/v2.0/ping")
-    # print(req)
-    # response = client.Do(req)
-    # print(response._content)
+    # if you provide a custom server, but you don't provide a
+    # custom user, try to connect to it without credentials
+    if server != default_url and user == default_user:
+        client = NewClient(server,
+                           WithDefaultName(name))
+    else:
+        client = NewClient(server,
+                           WithUsernamePassword(user, passwd),
+                           WithDefaultName(name))
 
     t = tarfile.open(image)
 
@@ -136,7 +168,6 @@ def kraft_push(ctx, image=None, name=None, server=None):
     manifest_digest = index_json['manifests'][0]['digest']
     tokens = manifest_digest.split(':')
     manifest_path = 'blobs/' + tokens[0] + '/' + tokens[1]
-    # print(manifest_path)
 
     manifest_fd = t.extractfile(manifest_path)
     manifest_json = json.load(manifest_fd)
@@ -145,33 +176,36 @@ def kraft_push(ctx, image=None, name=None, server=None):
     layers = manifest_json['layers']
     blobs = [config] + layers
 
-    # push the blobs specified
+    # push the config and layers blobs
     for blob in blobs:
+        # prepare the request to upload
+        req = client.NewRequest("POST", "/v2/" + project + "/<name>/blobs/uploads/")
+        response = client.Do(req)
+        if response.status_code != 202:
+            raise Exception('[POST] response', response.status_code)
+
         blob_digest = blob['digest']
         tokens = blob_digest.split(':')
         blob_path = 'blobs/' + tokens[0] + '/' + tokens[1]
-        # print(blob_path)
-        # prepare the request to upload
-        req = client.NewRequest("POST", "/v2/" + default_project + "/<name>/blobs/uploads/")
-        # print(req)
-        response = client.Do(req)
-        # print(response.headers['Location'])
 
         with t.extractfile(blob_path) as blob_fd:
             data = blob_fd.read()
 
+        # upload the blob
         req = (client.NewRequest("PUT", response.GetRelativeLocation()).
-                    SetHeader("Content-Type", blob['mediaType']). # "application/octet-stream").
+                    SetHeader("Content-Type", blob['mediaType']).
                     SetHeader("Content-Length", str(len(data))).
                     SetQueryParam("digest", blob_digest).
                     SetBody(data))
-        # print(req)
         response = client.Do(req)
-        # print(response.headers['Location'])
+        if response.status_code != 201:
+            raise Exception('[PUT] response', response.status_code)
 
     # upload the manifest
-    req = (client.NewRequest("PUT", "/v2/" + default_project + "/<name>/manifests/<reference>",
+    req = (client.NewRequest("PUT", "/v2/" + project + "/<name>/manifests/<reference>",
                 WithReference("latest")).
-                SetHeader("Content-Type", index_json['manifests'][0]['mediaType']). # "application/vnd.oci.image.manifest.v1+json").
+                SetHeader("Content-Type", index_json['manifests'][0]['mediaType']).
                 SetBody(manifest_json))
     response = client.Do(req)
+    if response.status_code != 201:
+            raise Exception('[PUT] response', response.status_code)
