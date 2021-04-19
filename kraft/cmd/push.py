@@ -2,8 +2,8 @@
 #
 # Authors: Laurentiu Barbulescu <lrbarbulescu@gmail.com>
 #
-# Copyright (c) 2021, NEC Europe Laboratories GmbH., NEC Corporation.
-#                     All rights reserved.
+#  Copyright (c) 2021, University Politehnica of Bucharest.
+#                      All rights reserved.
 #
 # Redistribution and use in source and binary forms, with or without
 # modification, are permitted provided that the following conditions
@@ -44,6 +44,7 @@ default_url = 'http://10.16.4.30:80'
 default_project = 'library'
 default_user = 'admin'
 default_passwd = 'Harbor12345'
+chunk_size = 262144 # 256kB
 
 # TODO: add version tag for repositories
 @click.command('push', short_help='Push an OCI-Image on Harbor')
@@ -89,7 +90,8 @@ default_passwd = 'Harbor12345'
 )
 
 @click.pass_context
-def cmd_push(ctx, image=None, name=None, server=None, project=None, user=None, passwd=None):
+def cmd_push(ctx, image=None, name=None, server=None,
+             project=None, user=None, passwd=None):
     """
     Push an OCI-Image on Harbor
     """
@@ -128,14 +130,15 @@ def cmd_push(ctx, image=None, name=None, server=None, project=None, user=None, p
         sys.exit(1)
 
 @click.pass_context
-def kraft_push(ctx, image=None, name=None, server=None, project=None, user=None, passwd=None):
+def kraft_push(ctx, image=None, name=None, server=None,
+               project=None, user=None, passwd=None):
   
     if not os.path.isfile(image):
-        raise Exception('Image not found.')
+        raise Exception('Archive not found.')
 
     rc = tarfile.is_tarfile(image)
     if not rc:
-        raise Exception('Bad OCI-Image format.')
+        raise Exception('The provided file is not a tar archive.')
 
     # if you provide a custom server, but you don't provide a
     # custom user, try to connect to it without credentials
@@ -165,28 +168,58 @@ def kraft_push(ctx, image=None, name=None, server=None, project=None, user=None,
 
     # push the config and layers blobs
     for blob in blobs:
-        # prepare the request to upload
-        req = client.NewRequest("POST", "/v2/" + project + "/<name>/blobs/uploads/")
-        response = client.Do(req)
-        if response.status_code != 202:
-            raise Exception('[POST] response', response.status_code)
 
         blob_digest = blob['digest']
         tokens = blob_digest.split(':')
         blob_path = 'blobs/' + tokens[0] + '/' + tokens[1]
 
-        with t.extractfile(blob_path) as blob_fd:
-            data = blob_fd.read()
+        # prepare the request to upload
+        req = (client.NewRequest("POST", "/v2/" + project + "/<name>/blobs/uploads/").
+                        SetHeader("Content-Type", blob['mediaType']).
+                        SetHeader("Content-Length", "0"))
+        response = client.Do(req)
+        if response.status_code != 202:
+            exception = "Upload preparation failed.\n[POST] response: %s" % response.status_code
+            raise Exception(exception)
 
-        # upload the blob
-        req = (client.NewRequest("PUT", response.GetRelativeLocation()).
-                    SetHeader("Content-Type", blob['mediaType']).
-                    SetHeader("Content-Length", str(len(data))).
-                    SetQueryParam("digest", blob_digest).
-                    SetBody(data))
+        start = 0
+        blob_fd = t.extractfile(blob_path)
+        # upload the blob in chuncks
+        for chunk in read_in_chunks(blob_fd, chunk_size):
+            if not chunk:
+                break
+        
+            chunk_len = len(chunk)
+            end = start + chunk_len - 1
+            content_range = "%s-%s" % (start, end)
+
+            req = (client.NewRequest("PATCH", response.GetRelativeLocation()).
+                        SetHeader("Content-Type", "application/octet-stream").
+                        SetHeader("Content-Length", str(chunk_len)).
+                        SetHeader("Content-Range", content_range).
+                        SetBody(chunk))
+            response = client.Do(req)
+            if response.status_code != 202:
+                exception = "Error uploading chunk.\n[PATCH] response: %s" % response.status_code
+                raise Exception(exception)
+
+            start = end + 1
+
+        # finish the upload
+        req = (client.NewRequest("PUT",  response.GetRelativeLocation()).
+                SetQueryParam("digest", blob_digest))
         response = client.Do(req)
         if response.status_code != 201:
-            raise Exception('[PUT] response', response.status_code)
+            exception = "Error uploading blob.\n[PATCH] response: %s" % response.status_code
+            raise Exception(exception)
+
+        # check if the blob was uploaded successfully
+        req = client.NewRequest("GET", "/v2/" + project + "/<name>/blobs/<digest>",
+                WithDigest(blob_digest))
+        response = client.Do(req)
+        if response.status_code != 200:
+            exception = "Blob upload failed.\n[PATCH] response: %s" % response.status_code
+            raise Exception(exception)
 
     # upload the manifest
     req = (client.NewRequest("PUT", "/v2/" + project + "/<name>/manifests/<reference>",
@@ -195,4 +228,14 @@ def kraft_push(ctx, image=None, name=None, server=None, project=None, user=None,
                 SetBody(manifest_json))
     response = client.Do(req)
     if response.status_code != 201:
-            raise Exception('[PUT] response', response.status_code)
+        exception = "Manifest upload failed.\n[PATCH] response: %s" % response.status_code
+        raise Exception(exception)
+
+
+def read_in_chunks(image, chunk_size=1024):
+    """Helper function to read file in chunks, with default size 1k."""
+    while True:
+        data = image.read(chunk_size)
+        if not data:
+            break
+        yield data
