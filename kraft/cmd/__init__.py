@@ -51,3 +51,4 @@ from .prepare import cmd_prepare
 from .run import cmd_run
 from .up import cmd_up
 from .package import cmd_package
+from .push import cmd_push
