@@ -98,6 +98,8 @@ TARBALL_SUPPORTED_EXTENSIONS = [
     '.tar.gz',
     '.tar.xz',
     '.tar',
+    '.tgz',
+    '.tbz2'
 ]
 
 SOURCEFORGE_PROJECT_NAME = re.compile(
@@ -126,9 +128,12 @@ UNIKRAFT_PLATSDIR = "plats"
 UNIKRAFT_LIBSDIR = "libs"
 UNIKRAFT_APPSDIR = "apps"
 UNIKRAFT_BUILDDIR = "build"
+UNIKRAFT_FETCHED_FILE = ".origin"
+UNIKRAFT_PREPARED_FILE = ".origin"
 
 UNIKRAFT_LIB_MAKEFILE_VERSION_EXT = '_VERSION'
 UNIKRAFT_LIB_MAKEFILE_URL_EXT = '_URL'
+UNIKRAFT_LIB_MAKEFILE_FETCH_LIB_PATTERN = re.compile(r'\$\(call fetch,([\w\-\_]+),')
 
 UNIKRAFT_LIB_KNOWN_MAKEFILE_VAR_EXTS = [
     UNIKRAFT_LIB_MAKEFILE_VERSION_EXT,
@@ -146,6 +151,8 @@ KRAFTRC_LIST_ORIGINS = "list/origins"
 KRAFTRC_INIT_WORKDIR = "init/workdir"
 KRAFTRC_CONFIGURE_PLATFORM = "configure/platform"
 KRAFTRC_CONFIGURE_ARCHITECTURE = "configure/architecture"
+KRAFTRC_FETCH_MIRRORS = "fetch/mirrors"
+KRAFTRC_FETCH_PRIORITIZE_ORIGIN = "fetch/prioritize_origin"
 
 KCONFIG = "CONFIG_%s"
 KCONFIG_Y = 'y'

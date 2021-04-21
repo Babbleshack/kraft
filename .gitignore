@@ -8,3 +8,4 @@ dist/
 .tox/
 *.pyc
 tags
+.concourse/pipelines/

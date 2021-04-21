@@ -37,9 +37,11 @@ import click
 from kraft.cmd import cmd_build
 from kraft.cmd import cmd_clean
 from kraft.cmd import cmd_configure
+from kraft.cmd import cmd_fetch
 from kraft.cmd import cmd_init
 from kraft.cmd import cmd_list
 from kraft.cmd import cmd_menuconfig
+from kraft.cmd import cmd_prepare
 from kraft.cmd import cmd_run
 from kraft.cmd import cmd_up
 from kraft.cmd import grp_lib
@@ -106,6 +108,8 @@ kraft.add_command(cmd_up)
 kraft.add_command(cmd_init)
 kraft.add_command(cmd_configure)
 kraft.add_command(cmd_menuconfig)
+kraft.add_command(cmd_fetch)
+kraft.add_command(cmd_prepare)
 kraft.add_command(cmd_build)
 kraft.add_command(cmd_run)
 kraft.add_command(cmd_clean)

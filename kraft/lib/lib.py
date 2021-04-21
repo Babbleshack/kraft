@@ -52,8 +52,12 @@ from kraft.const import MAKEFILE_UK
 from kraft.const import SEMVER_PATTERN
 from kraft.const import TEMPLATE_LIB
 from kraft.const import UK_VERSION_VARNAME
+from kraft.const import UNIKRAFT_BUILDDIR
+from kraft.const import UNIKRAFT_FETCHED_FILE
+from kraft.const import UNIKRAFT_LIB_MAKEFILE_FETCH_LIB_PATTERN
 from kraft.const import UNIKRAFT_LIB_MAKEFILE_URL_EXT
 from kraft.const import UNIKRAFT_LIB_MAKEFILE_VERSION_EXT
+from kraft.const import UNIKRAFT_PREPARED_FILE
 from kraft.const import VSEMVER_PATTERN
 from kraft.error import BumpLibraryDowngrade
 from kraft.error import CannotDetermineRemoteVersion
@@ -126,20 +130,107 @@ def intrusively_determine_lib_origin_version(localdir=None):
 
 
 class Library(Component):
-    _origin_url = None
     _type = ComponentType.LIB
+
+    _origin_url = None
 
     @property
     def origin_url(self):
-        if self._origin_url is None and os.path.exists(self.localdir):
+        """
+        Returns the $(LIBNAME_VERSION) formatted string of the origin URL.
+        """
+        if self._origin_url is not None:
+            return self._origin_url
+
+        elif os.path.exists(self.localdir):
             self._origin_url = intrusively_determine_lib_origin_url(self._localdir)
 
+        elif self.origin_provider is not None:
+            return self.origin_provider.origin_url_with_varname(
+                UK_VERSION_VARNAME % self.kname
+            )
+
         return self._origin_url
+
+    _origin_archive = None
+
+    @property
+    def origin_archive(self):
+        """
+        Returns the evaluated URL of the origin.  This is an exact location of
+        the remote archive.
+        """
+        if self._origin_archive is not None:
+            return self._origin_archive
+
+        elif self.origin_provider is not None and self.origin_version is not None:
+            self._origin_archive = self.origin_provider.origin_url_with_varname(
+                self.origin_version
+            )
+
+        if self._origin_archive is not None:
+            return self._origin_archive
+
+        elif self.origin_url is not None and self.origin_version is not None:
+            self._origin_archive = self.origin_url.replace(
+                UK_VERSION_VARNAME % self.kname,
+                self.origin_version
+            )
+
+        return self._origin_archive
+
+    _origin_filename = None
+
+    @property
+    def origin_filename(self):
+        """
+        Returns the filename of the origin from the evaluated archive URL.
+        """
+        if self._origin_filename is not None:
+            return self._origin_filename
+
+        elif self.origin_provider is not None and \
+                self.origin_provider.origin_filename is not None:
+            self._origin_filename = self.origin_provider.origin_filename
+
+        elif self.origin_archive is not None:
+            self._origin_filename = os.path.basename(self.origin_archive)
+
+        return self._origin_filename
+
+    @property
+    @click.pass_context
+    def origin_mirrors(ctx, self):
+        """
+        Returns a list of evaluated origin URL mirrors.  This method uses
+        information from the .kraftrc for a list of mirrors.
+        """
+
+        mirror_bases = ctx.obj.settings.fetch_mirrors
+        if mirror_bases is None or len(mirror_bases) == 0:
+            return []
+
+        origin_mirrors = []
+
+        for mirror_base in mirror_bases:
+            if self.origin_filename is not None:
+                origin_mirrors.append(os.path.join(
+                    mirror_base,
+                    "libs",
+                    self.name,
+                    self.origin_filename
+                ))
+
+        return origin_mirrors
 
     _origin_version = None
 
     @property
     def origin_version(self):
+        """
+        Returns the version specified in the Makefile.uk of the library, found
+        from LIBNAME_VERSION.
+        """
         if self._origin_version is None and os.path.exists(self.localdir):
             self._origin_version = intrusively_determine_lib_origin_version(self._localdir)
 
@@ -149,11 +240,22 @@ class Library(Component):
 
     @property
     def origin_provider(self):
+        """
+        Heuristically determines where the origin URL is provided from.  These
+        are provided as a child from the library provider class
+        kraft.lib.provider.Provider.
+        """
         if self._origin_provider is None and self.origin_url is not None:
             provider_cls = determine_lib_provider(self._origin_url)
+            if provider_cls is None:
+                logger.warn(
+                    "Cannot determine provider for: %s" % self._origin_url
+                )
+                return None
+
             self._origin_provider = provider_cls(
-                source=self._origin_url,
-                current_version=self.origin_version
+                origin_url=self._origin_url,
+                origin_version=self.origin_version
             )
 
         return self._origin_provider
@@ -242,11 +344,11 @@ class Library(Component):
         # Fix the starting "v" in the version string
         if context['cookiecutter']['version'].startswith('v'):
             context['cookiecutter']['version'] = context['cookiecutter']['version'][1:]
-            context['cookiecutter']['source_archive'] = self.version_source_archive(
+            self._origin_url = self.origin_provider.origin_url_with_varname(
                 'v%s' % (UK_VERSION_VARNAME % self.kname)
             )
-        else:
-            context['cookiecutter']['source_archive'] = self.version_source_archive()
+
+        context['cookiecutter']['origin_url'] = self.origin_url
 
         # include automatically generated content
         context['cookiecutter']['kconfig_dependencies'] = self.determine_kconfig_dependencies()
@@ -453,14 +555,60 @@ class Library(Component):
 
         return version
 
-    def version_source_archive(self, varname=None):
-        """
-        """
+    _builddir = None
 
-        if varname is None:
-            varname = UK_VERSION_VARNAME % self.kname
+    @property
+    @click.pass_context
+    def builddir(ctx, self):
+        if self._builddir is not None:
+            return self._builddir
 
-        return self.origin_provider.version_source_archive(varname)
+        if self.localdir is None:
+            raise None
+
+        if not os.path.exists(ctx.obj.workdir):
+            return None
+
+        builddir = os.path.join(ctx.obj.workdir, UNIKRAFT_BUILDDIR)
+        if not os.path.exists(builddir):
+            return None
+
+        makefile_uk = os.path.join(self.localdir, MAKEFILE_UK)
+        if not os.path.exists(makefile_uk):
+            return None
+
+        # Find the realy library name, at least, the name which is defined by
+        # the Unikraft fetch sequence.
+        s = open(makefile_uk, 'r')
+        libname = UNIKRAFT_LIB_MAKEFILE_FETCH_LIB_PATTERN.findall(s.read())[0]
+        s.close()
+
+        self._builddir = os.path.join(builddir, libname)
+        return self._builddir
+
+    @property
+    @click.pass_context
+    def is_fetched(ctx, self):
+        builddir = self.builddir
+        if builddir is None:
+            return False
+
+        if os.path.exists(os.path.join(builddir, UNIKRAFT_FETCHED_FILE)):
+            return True
+
+        return False
+
+    @click.pass_context
+    @property
+    def is_prepared(ctx, self):
+        builddir = self.builddir
+        if builddir is None:
+            return False
+
+        if os.path.exists(os.path.join(builddir, UNIKRAFT_PREPARED_FILE)):
+            return True
+
+        return False
 
     # TODO: Intrusively determine which additional unikraft librareis are
     # needed for this library to run.

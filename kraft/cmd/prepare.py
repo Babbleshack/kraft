@@ -29,23 +29,56 @@
 # CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
 # ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
 # POSSIBILITY OF SUCH DAMAGE.
-# flake8: noqa
 from __future__ import absolute_import
 from __future__ import unicode_literals
 
-from .cli import ClickOptionMutex
-from .cli import ClickReaderOption
-from .cli import ClickWriterCommand
-from .cli import ClickWriterOption
-from .cli import KraftHelpCommand
-from .cli import KraftHelpGroup
-from .dir import delete_resource
-from .dir import is_dir_empty
-from .dir import recursively_copy
-from .make import make_list_vars
-from .op import execute
-from .op import make_progressbar
-from .op import merge_dicts
-from .text import pretty_columns
-from .text import prettydate
-from .threading import ErrorPropagatingThread
+import os
+import sys
+
+import click
+
+from kraft.app import Application
+from kraft.cmd.list import kraft_list_preflight
+from kraft.logger import logger
+
+
+@click.pass_context
+def kraft_prepare(ctx, workdir=None):
+    """
+    """
+    if workdir is None or os.path.exists(workdir) is False:
+        raise ValueError("working directory is empty: %s" % workdir)
+
+    logger.debug("Preparing %s..." % workdir)
+
+    app = Application.from_workdir(workdir)
+
+    if not app.is_configured():
+        if click.confirm('It appears you have not configured your application.  Would you like to do this now?', default=True):  # noqa: E501
+            app.configure()
+
+    app.prepare()
+
+
+@click.command('prepare', short_help='Runs preparations steps on libraries.')
+@click.pass_context
+def cmd_prepare(ctx):
+    """
+    Prepares
+    """
+
+    kraft_list_preflight()
+
+    try:
+        kraft_prepare(
+            workdir=ctx.obj.workdir
+        )
+
+    except Exception as e:
+        logger.critical(str(e))
+
+        if ctx.obj.verbose:
+            import traceback
+            logger.critical(traceback.format_exc())
+
+        sys.exit(1)

@@ -38,6 +38,7 @@ import tempfile
 from pathlib import Path
 
 import click
+import requests
 import six
 
 import kraft.util as util
@@ -52,6 +53,7 @@ from kraft.const import DOT_CONFIG
 from kraft.const import MAKEFILE_UK
 from kraft.const import SUPPORTED_FILENAMES
 from kraft.const import UNIKRAFT_BUILDDIR
+from kraft.const import UNIKRAFT_LIB_MAKEFILE_URL_EXT
 from kraft.error import KraftError
 from kraft.error import KraftFileNotFound
 from kraft.error import MissingComponent
@@ -141,42 +143,10 @@ class Application(Component):
         if workdir is None:
             workdir = ctx.obj.workdir
 
-        config = None
-        try:
-            config = load_config(find_config(workdir, None, ctx.obj.env))
-        except KraftFileNotFound:
-            pass
-
-        # Dynamically update the configuration specification based on version
-        # overrides provided by use_versions
-        for use in use_versions:
-            _type, name, _, version = break_component_naming_format(use)
-
-            if _type is ComponentType.CORE:
-                config.unikraft.version = version
-
-            for k, target in enumerate(config.targets.all()):
-                if _type is ComponentType.ARCH or _type is None:
-                    if target.architecture.name == name:
-                        _type = ComponentType.ARCH
-                        target.architecture.version = version
-                        config.targets.set(k, target)
-                        break
-
-                if _type is ComponentType.PLAT or _type is None:
-                    if target.platform.name == name:
-                        _type = ComponentType.PLAT
-                        target.platform.version = version
-                        config.targets.set(k, target)
-                        break
-
-            if _type is ComponentType.LIB or _type is None:
-                for k, lib in enumerate(config.libraries.all()):
-                    if lib.name == name:
-                        _type = ComponentType.LIB
-                        lib.version = version
-                        config.libraries.set(k, lib)
-                        break
+        config = load_config(
+            find_config(workdir, None, ctx.obj.env),
+            use_versions=use_versions
+        )
 
         return cls(
             config=config,
@@ -244,7 +214,8 @@ class Application(Component):
             if not isinstance(target.platform, InternalPlatform):
                 plat_paths.append(target.platform.localdir)
 
-        cmd.append('P=%s' % ":".join(plat_paths))
+        if len(plat_paths) > 0:
+            cmd.append('P=%s' % ":".join(plat_paths))
 
         lib_paths = []
         for lib in self.config.libraries.all():
@@ -262,14 +233,14 @@ class Application(Component):
         return cmd
 
     @click.pass_context
-    def make(ctx, self, extra=None):
+    def make(ctx, self, extra=None, verbose=False):
         """
         Run a make target for this project.
         """
         cmd = self.make_raw(
-            extra=extra, verbose=ctx.obj.verbose
+            extra=extra, verbose=verbose
         )
-        util.execute(cmd)
+        return util.execute(cmd)
 
     @click.pass_context  # noqa: C901
     def configure(ctx, self, target=None, arch=None, plat=None, options=[],
@@ -325,21 +296,21 @@ class Application(Component):
         dotconfig.extend(self.config.unikraft.kconfig or [])
 
         for arch in archs:
-            if not arch.is_downloaded():
+            if not arch.is_downloaded:
                 raise MissingComponent(arch.name)
 
             dotconfig.extend(arch.kconfig)
             dotconfig.append(arch.kconfig_enabled_flag)
 
         for plat in plats:
-            if not plat.is_downloaded():
+            if not plat.is_downloaded:
                 raise MissingComponent(plat.name)
 
             dotconfig.extend(plat.kconfig)
             dotconfig.append(plat.kconfig_enabled_flag)
 
         for lib in self.config.libraries.all():
-            if not lib.is_downloaded():
+            if not lib.is_downloaded:
                 raise MissingComponent(lib.name)
 
             dotconfig.extend(lib.kconfig)
@@ -365,13 +336,17 @@ class Application(Component):
                 logger.debug(' > ' + line)
                 tmp.write(line + '\n')
 
+        return_code = 0
+
         try:
-            self.make([
+            return_code = self.make([
                 ('UK_DEFCONFIG=%s' % path),
                 'defconfig'
             ])
         finally:
             os.remove(path)
+
+        return return_code
 
     @click.pass_context
     def add_lib(ctx, self, lib=None):
@@ -399,19 +374,10 @@ class Application(Component):
         return True
 
     @click.pass_context
-    def build(ctx, self, fetch=True, prepare=True, target=None, n_proc=0):
+    def build(ctx, self, target=None, n_proc=0, verbose=False):
         extra = []
         if n_proc is not None and n_proc > 0:
             extra.append('-j%s' % str(n_proc))
-
-        if not fetch and not prepare:
-            fetch = prepare = True
-
-        if fetch:
-            self.make('fetch')
-
-        if prepare:
-            self.make('prepare')
 
         # Create a no-op when target is False
         if target is False:
@@ -420,7 +386,40 @@ class Application(Component):
         elif target is not None:
             extra.append(target)
 
-        self.make(extra)
+        return self.make(extra, verbose)
+
+    def list_possible_mirrors(self):
+        extra = []
+        for lib in self.config.libraries.all():
+            if not lib.is_fetched:
+                for mirror in lib.origin_mirrors:
+                    response = requests.head(mirror)
+                    if response.status_code == 200:
+                        extra.append(
+                            lib.kname +
+                            UNIKRAFT_LIB_MAKEFILE_URL_EXT +
+                            "=" +
+                            mirror
+                        )
+                    else:
+                        logger.debug("Mirror down: %s" % mirror)
+                        break
+        return extra
+
+    @click.pass_context
+    def fetch(ctx, self, verbose=False):
+        extra = []
+
+        if ctx.obj.settings.fetch_prioritize_origin is False:
+            extra.extend(self.list_possible_mirrors())
+
+        extra.append('fetch')
+
+        return self.make(extra, verbose)
+
+    @click.pass_context
+    def prepare(ctx, self, verbose=False):
+        return self.make('prepare', verbose)
 
     def init(self, create_makefile=False, force_create=False):
         """

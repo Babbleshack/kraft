@@ -39,6 +39,11 @@ import dpath.util
 import toml
 from toml import TomlEncoder
 
+from kraft.const import KRAFTRC_CONFIGURE_ARCHITECTURE
+from kraft.const import KRAFTRC_CONFIGURE_PLATFORM
+from kraft.const import KRAFTRC_FETCH_MIRRORS
+from kraft.const import KRAFTRC_FETCH_PRIORITIZE_ORIGIN
+from kraft.const import KRAFTRC_LIST_ORIGINS
 from kraft.logger import logger
 
 
@@ -95,7 +100,7 @@ class Settings(object):
             result = dpath.util.get(self._settings, prop)
         except KeyError:
             logger.debug('Missed setting lookup: %s', prop)
-            result = None
+            result = default
 
         return result
 
@@ -103,3 +108,43 @@ class Settings(object):
         if val is not None:
             dpath.util.new(self._settings, prop, val)
             self.save()
+
+    @property
+    def fetch_mirrors(self):
+        return self.get(
+            KRAFTRC_FETCH_MIRRORS, [
+                "https://releases.unikraft.org/mirrors"
+            ]
+        )
+
+    @property
+    def fetch_prioritize_origin(self):
+        return self.get(
+            KRAFTRC_FETCH_PRIORITIZE_ORIGIN,
+            False
+        )
+
+    @property
+    def configure_platform(self):
+        return self.get(
+            KRAFTRC_CONFIGURE_PLATFORM,
+            "kvm"
+        )
+
+    @property
+    def configure_architecture(self):
+        return self.get(
+            KRAFTRC_CONFIGURE_ARCHITECTURE,
+            "x86_64"
+        )
+
+    @property
+    def list_origins(self):
+        return self.get(
+            KRAFTRC_LIST_ORIGINS, [
+                "http://github.com/unikraft/unikraft.git",
+                "http://github.com/unikraft/plat-*",
+                "http://github.com/unikraft/app-*",
+                "http://github.com/unikraft/lib-*"
+            ]
+        )

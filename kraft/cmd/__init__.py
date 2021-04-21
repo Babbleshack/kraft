@@ -36,6 +36,7 @@ from __future__ import unicode_literals
 from .build import cmd_build
 from .clean import cmd_clean
 from .configure import cmd_configure
+from .fetch import cmd_fetch
 from .init import cmd_init
 from .lib import cmd_lib_bump
 from .lib import cmd_lib_init
@@ -46,6 +47,7 @@ from .list import cmd_list_pull
 from .list import cmd_list_remove
 from .list import cmd_list_update
 from .menuconfig import cmd_menuconfig
+from .prepare import cmd_prepare
 from .run import cmd_run
 from .up import cmd_up
 from .package import cmd_package
