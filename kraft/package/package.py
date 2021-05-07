@@ -45,6 +45,7 @@ from opencontainers.image.v1 import (
 import opencontainers.image.v1.mediatype as MediaType
 import opencontainers.image.v1.annotations as AnnotationRefName
 from opencontainers.image.v1.config import Image
+from opencontainers.image.v1.config import ImageConfig
 from opencontainers.digest  import Canonical as default_digest_algorithm
 from opencontainers.image.specs import Versioned 
 from opencontainers.digest.algorithm import algorithms
@@ -538,10 +539,22 @@ class Packager:
             "diff_ids": [rootfs_digest.digest]
         }
         #rootfs = RootFS(rootfs_type="layers", diff_ids=[rootfs_digest.digest])
+
+        ##
+        # Some default commands to satisfy containerd
+        # Containerd expects to createa  container with some process, we do not
+        # want to create a container. Instead we insert a 'dummy' command to
+        # satisfy containerd requirements 
+        ##
+        ic = {
+            "Entrypoint": ["qemu"],
+            "Cmd": ["qemu"]
+        }
         image_config = Image(
             arch=self._image.architecture,
             imageOS="linux",
-            rootfs=rootfs_d
+            rootfs=rootfs_d,
+            imageConfig=ic
         )
         try:
             _validate(image_config)
